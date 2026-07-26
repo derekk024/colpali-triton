@@ -34,3 +34,18 @@ deterministic generated document page and one query, validates the
 multi-vector shapes and norms, computes a real PyTorch MaxSim score, and writes
 a provenance-rich record to `artifacts/phase8/colpali_mps_smoke.json`.
 Existing output records are protected unless `--overwrite` is passed.
+
+Run one Phase 9 released-ColPali subset evaluation:
+
+```text
+.venv-phase7/bin/python scripts/evaluate_colpali_subset.py \
+  --task docvqa \
+  --local-files-only
+```
+
+Use `--task infovqa` for the second fixed task. Each run verifies the pinned
+model, adapter, image corpus, queries, and qrels; checks the precommitted
+100-page/50-query subset fingerprints; indexes every selected page once; and
+evaluates both late-interaction MaxSim and the L2-normalized masked-mean
+ablation over the complete selected corpus. Results are written under
+`artifacts/phase9/` and protected against replacement by default.

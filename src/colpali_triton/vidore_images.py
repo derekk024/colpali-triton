@@ -110,9 +110,7 @@ class ImageDocument:
         """Decode a fresh source image for one indexing call."""
 
         try:
-            with Image.open(BytesIO(self.encoded_image_bytes)) as source:
-                source.load()
-                return source.copy()
+            return Image.open(BytesIO(self.encoded_image_bytes))
         except Exception as error:
             raise DatasetValidationError(
                 f"document {self.document_id!r} image could not be decoded"
@@ -122,6 +120,7 @@ class ImageDocument:
         return {
             "document_id": self.document_id,
             "encoded_image_sha256": self.encoded_image_sha256,
+            "encoded_size_bytes": len(self.encoded_image_bytes),
             "source_format": self.source_format,
             "source_size": list(self.source_size),
         }
