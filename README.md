@@ -2,12 +2,13 @@
 
 This repository is a scoped reproduction of
 [ColPali: Efficient Document Retrieval with Vision Language Models](https://arxiv.org/abs/2407.01449).
-The completed local milestones cover phases 1–8: paper analysis, project
+The completed local milestones cover phases 1–9: paper analysis, project
 scaffolding, nested-loop and vectorized PyTorch MaxSim, correctness and gradient
 tests, the paper's hardest-in-batch loss, and a controlled synthetic overfit
 proof, followed by pinned ViDoRe text loaders, retrieval metrics, and measured
 OCR-text baselines, plus a paper-era PaliGemma/ColPali model, processor, and
-LoRA integration and a real released-checkpoint Apple MPS smoke test.
+LoRA integration, a real released-checkpoint Apple MPS smoke test, and scoped
+multimodal retrieval results with a mean-pooled ablation.
 
 Phase 6 uses a revision-pinned BGE-M3 checkpoint and remote, column-selective
 reads of two ViDoRe tasks. Phase 7 pins the public BF16 ViDoRe base and the
@@ -200,6 +201,33 @@ See [the Phase 8 report](reports/phase_8_mps_smoke.md) for the verified
 artifact digests, exact environment, initial defect found by the smoke run,
 raw-record digest, limitations, and reproduction command.
 
+## Phase 9 scoped ColPali results
+
+Before scoring, Phase 9 fixed 50 queries and 100 pages from each of DocVQA and
+InfoVQA by a committed SHA-256 identifier-order rule. Every positive page for
+every selected query is included, and each query is evaluated against all 100
+pages. The source Parquet files, selected identifiers, query text, qrels, and
+encoded image bytes are revision-pinned and fingerprinted.
+
+| Task | Scorer | nDCG@5 | Recall@5 | MRR@5 |
+| --- | --- | ---: | ---: | ---: |
+| DocVQA | ColPali MaxSim | 0.6720 | 0.8200 | 0.6217 |
+| DocVQA | Normalized mean pooling | 0.2805 | 0.3200 | 0.2667 |
+| InfoVQA | ColPali MaxSim | 0.8679 | 0.9000 | 0.8567 |
+| InfoVQA | Normalized mean pooling | 0.6904 | 0.8400 | 0.6413 |
+
+Both scorers consume the same released-model token vectors and query
+encodings; only aggregation changes. The BF16 multi-vector payload plus its
+Boolean mask uses 264,710 bytes per page, while the float32 mean vector uses
+512 bytes. Local indexing measured about 0.52 pages/second on both tasks.
+
+These are real scoped-subset measurements, not the paper's full-task results.
+The earlier Phase 6 BM25 and BGE-M3 runs use the full 500-page subsamples, so
+their quality numbers are not treated as direct head-to-head subset
+comparisons. Exact selection rules, timing, throughput, memory, score-matrix
+digests, raw-result digests, and limitations are in
+[the Phase 9 report](reports/phase_9_colpali_subset.md).
+
 ## Local setup
 
 Python 3.9 or newer is supported.
@@ -266,4 +294,4 @@ the phase-5 experiment is in [its test report](reports/phase_5_test_results.md);
 the Phase 6 baseline suite is in
 [its test report](reports/phase_6_test_results.md); and the latest complete
 local verification is recorded in
-[the Phase 8 MPS report](reports/phase_8_mps_smoke.md).
+[the Phase 9 report](reports/phase_9_colpali_subset.md).
