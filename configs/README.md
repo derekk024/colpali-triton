@@ -32,3 +32,10 @@ SHA-256-based selection of 50 queries and 100 pages from each pinned DocVQA
 and InfoVQA test subsample, includes every selected query's positive page,
 records precomputed selection and image-content fingerprints, and defines the
 late-interaction and normalized mean-pooled evaluation settings.
+
+Phase 10 adds `maxsim_benchmark.json`. It strictly pins the CUDA device index,
+random seed, PyTorch/Triton provider order, FP16/BF16 correctness tolerances,
+six ColPali-shaped workloads, warmup/trial counts, normalized input contract,
+and exact Triton block, warp, and stage settings. The loader rejects duplicate
+JSON keys, unknown fields, invalid masks or launch values, and launch blocks
+that cannot cover the configured embedding dimension.

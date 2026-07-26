@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "phase10-l4-maxsim-v1",
+  "seed": 20250725,
+  "device": {
+    "type": "cuda",
+    "index": 0
+  },
+  "timing": {
+    "warmup_iterations": 10,
+    "measured_iterations": 50,
+    "trials": 5
+  },
+  "providers": [
+    "torch",
+    "triton"
+  ],
+  "triton_launch": {
+    "block_query_tokens": 16,
+    "block_document_tokens": 64,
+    "block_embedding_dimension": 128,
+    "num_warps": 4,
+    "num_stages": 2
+  },
+  "dtypes": [
+    {
+      "name": "float16",
+      "absolute_tolerance": 0.05,
+      "relative_tolerance": 0.01
+    },
+    {
+      "name": "bfloat16",
+      "absolute_tolerance": 0.1,
+      "relative_tolerance": 0.02
+    }
+  ],
+  "cases": [
+    {
+      "name": "colpali_q15_d1",
+      "query_batch_size": 1,
+      "document_batch_size": 1,
+      "query_tokens": 15,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 15,
+      "active_document_tokens": 1030
+    },
+    {
+      "name": "colpali_q15_d8",
+      "query_batch_size": 1,
+      "document_batch_size": 8,
+      "query_tokens": 15,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 15,
+      "active_document_tokens": 1030
+    },
+    {
+      "name": "colpali_q15_d32",
+      "query_batch_size": 1,
+      "document_batch_size": 32,
+      "query_tokens": 15,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 15,
+      "active_document_tokens": 1030
+    },
+    {
+      "name": "colpali_q15_d128",
+      "query_batch_size": 1,
+      "document_batch_size": 128,
+      "query_tokens": 15,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 15,
+      "active_document_tokens": 1030
+    },
+    {
+      "name": "padded_q32_d64",
+      "query_batch_size": 1,
+      "document_batch_size": 64,
+      "query_tokens": 32,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 23,
+      "active_document_tokens": 977
+    },
+    {
+      "name": "long_q50_d32",
+      "query_batch_size": 1,
+      "document_batch_size": 32,
+      "query_tokens": 50,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 50,
+      "active_document_tokens": 1030
+    }
+  ],
+  "normalize_embeddings": true
+}
