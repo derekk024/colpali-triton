@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "format": "colpali-triton-phase7-checkpoints-v1",
+  "source_backbone": {
+    "repository": "google/paligemma-3b-mix-448",
+    "revision": "ead2d9a35598cb89119af004f5d023b311d1c4a1",
+    "dtype": "float32",
+    "parameter_count": 2924351216,
+    "expected_artifact_count": 3,
+    "artifacts": [
+      {
+        "path": "model-00001-of-00003.safetensors",
+        "size_bytes": 4956951424,
+        "sha256": "570dab6f84d3b784a06707cdc4742f97545dfd57d73742bb2fcb3190a09696a4"
+      },
+      {
+        "path": "model-00002-of-00003.safetensors",
+        "size_bytes": 4999820608,
+        "sha256": "334b225c0ec1db8f3952121f5f67a78b37167623e2178c0babe3086fcc8ea4ad"
+      },
+      {
+        "path": "model-00003-of-00003.safetensors",
+        "size_bytes": 1740714288,
+        "sha256": "8c75421941def510a8c2364726d8ab36cf1a0653b355368d2e2a80766b5a4f5f"
+      }
+    ]
+  },
+  "source_terms": {
+    "access": "manual_gated",
+    "license_id": "gemma"
+  },
+  "runtime_base": {
+    "repository": "vidore/colpaligemma-3b-mix-448-base",
+    "revision": "6ff0d944ea09c3ead97d2bc57427e3d4f01d192f",
+    "dtype": "bfloat16",
+    "parameter_count": 2924613488,
+    "expected_artifact_count": 2,
+    "artifacts": [
+      {
+        "path": "model-00001-of-00002.safetensors",
+        "size_bytes": 4986817288,
+        "sha256": "8b439a322fa98964517fca8fbf0a1d17e6e60e7e8812bc1c373ad87d654108d5"
+      },
+      {
+        "path": "model-00002-of-00002.safetensors",
+        "size_bytes": 862495528,
+        "sha256": "ad075b39b4a24b309028f3d003a0e7cad9e45fa2dbbd267867474e77e10df814"
+      }
+    ]
+  },
+  "paper_adapter": {
+    "repository": "vidore/colpali",
+    "revision": "234ecbefa176542348dc5fae4f95c9736858edc2",
+    "dtype": "bfloat16",
+    "parameter_count": 39292928,
+    "expected_artifact_count": 1,
+    "artifacts": [
+      {
+        "path": "adapter_model.safetensors",
+        "size_bytes": 78625112,
+        "sha256": "961b72c2b2a1bebc3e11e7d98cd173d263437aad5ef36e760e9265c184c88d64"
+      }
+    ]
+  },
+  "architecture": {
+    "hidden_size": 2048,
+    "projection_dimension": 128,
+    "image_size_pixels": 448,
+    "patch_size_pixels": 14,
+    "image_token_count": 1024,
+    "embedding_normalization": "l2_last_dimension",
+    "masked_embedding_value": 0.0
+  },
+  "processing": {
+    "document_prompt": "Describe the image.",
+    "query_prefix": "Question: ",
+    "query_augmentation_token": "<unused0>",
+    "query_augmentation_count": 5,
+    "query_augmentation_separator": "",
+    "text_max_length": 50
+  },
+  "lora": {
+    "rank": 32,
+    "alpha": 32,
+    "dropout": 0.1,
+    "bias": "none",
+    "initialization": "gaussian",
+    "task_type": "FEATURE_EXTRACTION",
+    "target_modules_pattern": "(.*(language_model).*(down_proj|gate_proj|up_proj|k_proj|q_proj|v_proj|o_proj).*$|.*(custom_text_proj).*$)",
+    "peft_type": "LORA",
+    "inference_mode": false,
+    "use_dora": false,
+    "use_rslora": false,
+    "modules_to_save": null
+  }
+}

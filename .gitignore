@@ -11,7 +11,7 @@ build/
 dist/
 
 # Environments and local configuration
-.venv/
+.venv*/
 venv/
 .env
 .env.*
@@ -40,4 +40,3 @@ mlruns/
 .aws/
 .cache/
 huggingface/
-
