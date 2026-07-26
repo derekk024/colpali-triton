@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "colpali-triton"
+version = "0.3.0"
+description = "A scoped ColPali reproduction with tested retrieval components"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24,<3",
+    "torch>=2.2,<3",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3,<9",
+    "rank-bm25==0.2.2",
+]
+evaluation = [
+    "fsspec[http]==2025.2.0",
+    "pyarrow==21.0.0",
+    "sentence-transformers==3.0.1",
+    "transformers==4.41.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "mps: exercises the Apple Metal backend when it is available",
+]

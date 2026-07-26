@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "benchmark_definition": {
+    "url": "https://github.com/embeddings-benchmark/mteb/blob/c67d000b43c841df834a53f92ccf6f2e3be77cfb/mteb/tasks/retrieval/eng/vidore_bench_retrieval.py",
+    "revision": "c67d000b43c841df834a53f92ccf6f2e3be77cfb"
+  },
+  "join_contract": {
+    "method": "ocr_rows_to_qrels_by_row_order",
+    "guard": "ocr_query_must_exactly_equal_beir_query_for_qrel",
+    "relevance": "binary_positive_scores"
+  },
+  "datasets": {
+    "docvqa": {
+      "name": "docvqa",
+      "split": "test",
+      "beir": {
+        "repository": "mteb/docvqa_test_subsampled_beir",
+        "revision": "e78cd130055fcb8d69bb0ff4115c4712a157f3d3",
+        "corpus": {
+          "path": "corpus/test-00000-of-00001.parquet",
+          "size_bytes": 292286618,
+          "sha256": "1d2f0d488fb0ed218b7ab3f63c2b3dedb0a01a90ec3ccf30db8cd4a909c79a7f"
+        },
+        "queries": {
+          "path": "queries/test-00000-of-00001.parquet",
+          "size_bytes": 15679,
+          "sha256": "bcc4a349613a2a89bdc1a7635c81d8d36cabda58b5e6df7e97b17c95fddb5cc0"
+        },
+        "qrels": {
+          "path": "qrels/test-00000-of-00001.parquet",
+          "size_bytes": 6533,
+          "sha256": "f5297c53733a3d2de676b044953d513b0a33972963c42e22f80ee4a50c6d8c7f"
+        }
+      },
+      "ocr": {
+        "repository": "vidore/docvqa_test_subsampled_tesseract",
+        "revision": "9a183a7237d678eaaf68dc0f640a42f46016802f",
+        "data": {
+          "path": "data/test-00000-of-00001.parquet",
+          "size_bytes": 292710972,
+          "sha256": "48428c3217bf89ef4f0b72a34ea903a99ca71d34312335e9b7777ecdbe3358b6"
+        }
+      },
+      "expected_counts": {
+        "documents": 500,
+        "queries": 451,
+        "qrels": 500,
+        "ocr_rows": 500
+      },
+      "expected_content_fingerprint": "3f0df908eb592425c4bc2ab68883736f6ca2f34ac9f67383a09468a600b7e580"
+    },
+    "infovqa": {
+      "name": "infovqa",
+      "split": "test",
+      "beir": {
+        "repository": "mteb/infovqa_test_subsampled_beir",
+        "revision": "74d396242cc281c021eeb38d0ee5f6f30afc1fad",
+        "corpus": {
+          "path": "corpus/test-00000-of-00001.parquet",
+          "size_bytes": 176206329,
+          "sha256": "95981ef151bb4c85e49234e7a19322242ad41a03bc41aead5f5d5240aa0545fd"
+        },
+        "queries": {
+          "path": "queries/test-00000-of-00001.parquet",
+          "size_bytes": 24775,
+          "sha256": "f5e3a1a4992cda32b710b67099e6ea3997bdb1e8089180a418a753f212f5b1f0"
+        },
+        "qrels": {
+          "path": "qrels/test-00000-of-00001.parquet",
+          "size_bytes": 6705,
+          "sha256": "b4093f0963426b1206ea1f23bc2b4d6f6fff76531b55eb5d577250244d7ef325"
+        }
+      },
+      "ocr": {
+        "repository": "vidore/infovqa_test_subsampled_tesseract",
+        "revision": "7bd56b41a40e767bba7b1467c5520c337246291c",
+        "data": {
+          "path": "data/test-00000-of-00001.parquet",
+          "size_bytes": 176824433,
+          "sha256": "a280326796ee34d206943233b6916cfdebe4072b10dd00fb93e3d978b547319f"
+        }
+      },
+      "expected_counts": {
+        "documents": 500,
+        "queries": 494,
+        "qrels": 500,
+        "ocr_rows": 500
+      },
+      "expected_content_fingerprint": "fc39812e6d6350c6fc8894f0f37978739684a240da4fda102fd48551b7ac434d"
+    }
+  }
+}

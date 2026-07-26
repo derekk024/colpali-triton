@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "seed": 17,
+  "evaluation": {
+    "k": 5,
+    "warmup_queries": 5,
+    "tie_break": "score_descending_then_document_id_descending"
+  },
+  "chunking": {
+    "unit": "normalized_whitespace_words",
+    "max_words": 192,
+    "overlap_words": 32,
+    "page_aggregation": "maximum_chunk_score"
+  },
+  "bm25": {
+    "name": "tesseract_page_ocr_bm25_chunk_max",
+    "formula": "rank_bm25_0.2.2_BM25Okapi",
+    "k1": 1.5,
+    "b": 0.75,
+    "epsilon": 0.25,
+    "tokenizer": "NFKC_casefold_unicode_alphanumeric",
+    "stopwords": false
+  },
+  "dense": {
+    "name": "tesseract_page_ocr_bge_m3_dense_chunk_max",
+    "model_id": "BAAI/bge-m3",
+    "model_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "model_weight_sha256": "b5e0ce3470abf5ef3831aa1bd5553b486803e83251590ab7ff35a117cf6aad38",
+    "model_weight_size_bytes": 2271145830,
+    "pooling": "cls",
+    "embedding_dimension": 1024,
+    "normalize_embeddings": true,
+    "query_prefix": "",
+    "dtype": "float32",
+    "max_seq_length": 512,
+    "batch_size": {
+      "cpu": 2,
+      "mps": 2,
+      "cuda": 8
+    },
+    "sentence_transformers_version": "3.0.1",
+    "transformers_version": "4.41.1"
+  }
+}

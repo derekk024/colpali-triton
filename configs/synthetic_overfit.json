@@ -1,0 +1,19 @@
+{
+  "experiment": {
+    "seed": 17,
+    "num_pairs": 6,
+    "query_tokens": 3,
+    "document_tokens": 5,
+    "embedding_dim": 8,
+    "steps": 60,
+    "learning_rate": 0.1
+  },
+  "acceptance": {
+    "minimum_loss_reduction_fraction": 0.85,
+    "minimum_final_top1_accuracy": 1.0,
+    "minimum_positive_margin": 1.5,
+    "minimum_initial_gradient_norm": 0.0,
+    "maximum_padding_gradient": 0.0,
+    "maximum_padding_parameter_change": 0.0
+  }
+}
