@@ -16,10 +16,11 @@ reimplementing PaliGemma. The package now provides:
 - mask-bound multi-vector encodings that feed the existing tested MaxSim
   scorer.
 
-The large released base is deliberately left for the Phase 8 end-to-end MPS
-smoke run. Phase 7 validates the implementation with a real PaliGemma processor,
-a real released adapter, miniature PaliGemma models, and network-free unit
-tests.
+Phase 7 validated the implementation with a real PaliGemma processor, a real
+released adapter, miniature PaliGemma models, and network-free unit tests. The
+large released base was deliberately left for the separate Phase 8 end-to-end
+MPS gate, which subsequently passed and is documented in
+`phase_8_mps_smoke.md`.
 
 ## Pinned upstream artifacts
 
@@ -118,8 +119,8 @@ adapter parameters     39,292,928
 The public base index contains both `custom_text_proj.weight` and
 `custom_text_proj.bias`, 605 total weight entries, a 2,048-wide text model,
 448/14 vision geometry, and the state prefix expected by the implementation.
-These checks inspect revision-pinned metadata; the two large base shards are
-byte-verified during Phase 8.
+These checks inspect revision-pinned metadata. The two large base shards were
+subsequently byte-verified and executed during Phase 8.
 
 ## Deviations and limits
 
@@ -131,8 +132,8 @@ byte-verified during Phase 8.
 - The released adapter is used for local inference. New LoRA training and the
   frozen-backbone comparison remain later evaluation work.
 - Miniature PaliGemma tests prove state layout, forward behavior, PEFT
-  insertion, masking, normalization, serialization, and gradients. A real
-  released-base forward pass is the separate Phase 8 acceptance gate.
+  insertion, masking, normalization, serialization, and gradients. The
+  separate real released-base Phase 8 acceptance gate subsequently passed.
 
 ## Environment
 

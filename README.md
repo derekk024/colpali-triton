@@ -2,12 +2,12 @@
 
 This repository is a scoped reproduction of
 [ColPali: Efficient Document Retrieval with Vision Language Models](https://arxiv.org/abs/2407.01449).
-The completed local milestones cover phases 1–7: paper analysis, project
+The completed local milestones cover phases 1–8: paper analysis, project
 scaffolding, nested-loop and vectorized PyTorch MaxSim, correctness and gradient
 tests, the paper's hardest-in-batch loss, and a controlled synthetic overfit
 proof, followed by pinned ViDoRe text loaders, retrieval metrics, and measured
 OCR-text baselines, plus a paper-era PaliGemma/ColPali model, processor, and
-LoRA integration.
+LoRA integration and a real released-checkpoint Apple MPS smoke test.
 
 Phase 6 uses a revision-pinned BGE-M3 checkpoint and remote, column-selective
 reads of two ViDoRe tasks. Phase 7 pins the public BF16 ViDoRe base and the
@@ -179,7 +179,26 @@ Loading verifies approximately 5.93 GB of pinned public base and adapter
 weights before inference. The gated Google checkpoint in the manifest is a
 source reference, not a claim that its current revision is the paper's original
 training revision. See [the Phase 7 integration report](reports/phase_7_model_integration.md)
-for the exact revisions, contracts, checks, and remaining Phase 8 boundary.
+for the exact revisions, contracts, and checks.
+
+## Phase 8 MPS smoke result
+
+The released BF16 base and paper adapter completed a real document/query
+forward pass on the Apple M3 Pro GPU. The deterministic 448-pixel test page
+produced `[1, 1030, 128]` document vectors; the augmented query produced
+`[1, 15, 128]` query vectors. All active-vector norms were within `0.00385` of
+one, masked values were exactly zero, and PyTorch MaxSim returned the finite
+score `13.28125`.
+
+Observed synchronized MPS allocator snapshots reached 6,007,417,856 current
+bytes and 8,765,964,288 driver bytes against PyTorch's 12,884,918,272-byte
+recommended maximum. Single-shot document encoding took 3.066 seconds and
+query encoding took 0.962 seconds. These cold smoke timings are not benchmark
+claims.
+
+See [the Phase 8 report](reports/phase_8_mps_smoke.md) for the verified
+artifact digests, exact environment, initial defect found by the smoke run,
+raw-record digest, limitations, and reproduction command.
 
 ## Local setup
 
@@ -246,4 +265,5 @@ phases 1–4 run remains in [the original local test report](reports/local_test_
 the phase-5 experiment is in [its test report](reports/phase_5_test_results.md);
 the Phase 6 baseline suite is in
 [its test report](reports/phase_6_test_results.md); and the latest complete
-suite is recorded in [the Phase 7 test report](reports/phase_7_test_results.md).
+local verification is recorded in
+[the Phase 8 MPS report](reports/phase_8_mps_smoke.md).
