@@ -26,3 +26,9 @@ Phase 7 adds:
 - `phase7_macos_arm64_constraints.txt`: the exact dependency versions in the
   clean Apple-arm64 Phase 7 test and inference environment. Use it as a
   constraints file, not as a standalone requirements file.
+
+Phase 9 adds `phase9_colpali_subset.json`. It fixes a content-independent,
+SHA-256-based selection of 50 queries and 100 pages from each pinned DocVQA
+and InfoVQA test subsample, includes every selected query's positive page,
+records precomputed selection and image-content fingerprints, and defines the
+late-interaction and normalized mean-pooled evaluation settings.

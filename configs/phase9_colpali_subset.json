@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "format": "colpali-triton-phase9-subset-v1",
+  "seed": 17,
+  "model_manifest_fingerprint": "e9accebbdcdf821d1bdb64606ee7427d80947237833e4eaf90e199a90b057d88",
+  "dataset_manifest_fingerprint": "9f431875d89549c3ae9f58904cbb8f579db095405743200bd249988b58917ebe",
+  "selection": {
+    "method": "sha256_identifier_order",
+    "salt": "colpali-triton-phase9-v1",
+    "queries_per_task": 50,
+    "documents_per_task": 100,
+    "positive_policy": "include_all_selected_query_positives",
+    "distractor_policy": "sha256_identifier_order"
+  },
+  "evaluation": {
+    "k": 5,
+    "warmup_queries": 1,
+    "document_batch_size": 1,
+    "score_document_batch_size": 16,
+    "dtype": "bfloat16",
+    "device": "mps",
+    "attention_implementation": "eager",
+    "scorers": [
+      "late_interaction_maxsim",
+      "l2_normalized_masked_mean"
+    ]
+  },
+  "tasks": {
+    "docvqa": {
+      "source_spec_fingerprint": "98e29159168e03bbabcd4a50a86c8ed414335efb5f236f6ed432896006e3b2ac",
+      "selection_fingerprint": "2003c978f51a8591b49f2129e52d9d33c12acd4f9ecef7e87c49fee1d9d1cbaa",
+      "image_content_fingerprint": "d199fe34628534923868254578395d628d7508fd07f26dc41da3fd433e769054"
+    },
+    "infovqa": {
+      "source_spec_fingerprint": "6b73523943d2187c78bdba80abf19712c72942cf28d15c92ddeebc1a4f27a816",
+      "selection_fingerprint": "9542196b7b4305749caa7137b374c878bd105f43e96bd099205d5977cfc8af37",
+      "image_content_fingerprint": "3903702a5543afc2534d8c7999812ab19119ca9c3ce02b75f710fd846a1eb2d5"
+    }
+  }
+}
