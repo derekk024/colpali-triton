@@ -83,6 +83,11 @@ class ColPali(PaliGemmaPreTrainedModel):
             if model is not None
             else PaliGemmaForConditionalGeneration(config)
         )
+        inner_tied_keys = getattr(self.model, "_tied_weights_keys", None)
+        if inner_tied_keys:
+            self._tied_weights_keys = [
+                f"model.{key}" for key in inner_tied_keys
+            ]
         self.custom_text_proj = nn.Linear(
             config.text_config.hidden_size,
             retrieval_dimension,
@@ -97,6 +102,26 @@ class ColPali(PaliGemmaPreTrainedModel):
     @property
     def hidden_size(self) -> int:
         return self.custom_text_proj.in_features
+
+    def get_input_embeddings(self) -> nn.Module:
+        """Delegate tied-token input embeddings to the PaliGemma backbone."""
+
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, value: nn.Module) -> None:
+        """Set the PaliGemma token embeddings through the outer model."""
+
+        self.model.set_input_embeddings(value)
+
+    def get_output_embeddings(self) -> nn.Module:
+        """Delegate the tied language-model head to the backbone."""
+
+        return self.model.get_output_embeddings()
+
+    def set_output_embeddings(self, value: nn.Module) -> None:
+        """Set the PaliGemma language-model head through the outer model."""
+
+        self.model.set_output_embeddings(value)
 
     def forward(
         self,

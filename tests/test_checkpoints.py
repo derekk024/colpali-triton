@@ -2,8 +2,12 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
+import torch
 
-from colpali_triton.checkpoints import verify_checkpoint_artifacts
+from colpali_triton.checkpoints import (
+    _validate_materialized_model,
+    verify_checkpoint_artifacts,
+)
 from colpali_triton.phase7_config import (
     ModelArtifactSpec,
     ModelCheckpointSpec,
@@ -134,6 +138,13 @@ def test_checkpoint_verification_rejects_missing_download(
             cache_dir=tmp_path / "cache",
             download_file=lambda *_: missing,
         )
+
+
+def test_materialization_audit_rejects_meta_parameters() -> None:
+    model = torch.nn.Linear(2, 2, device="meta")
+
+    with pytest.raises(RuntimeError, match="unmaterialized meta tensors"):
+        _validate_materialized_model(model, "test model")
 
 
 @pytest.mark.parametrize(

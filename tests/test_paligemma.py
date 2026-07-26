@@ -139,6 +139,30 @@ def test_tiny_model_save_and_from_pretrained_round_trip(
     assert torch.equal(actual.mask, expected.mask)
 
 
+def test_low_memory_load_materializes_and_reties_language_head(
+    tmp_path: Path,
+) -> None:
+    model = ColPali(_tiny_config()).eval()
+    model.save_pretrained(tmp_path, safe_serialization=True)
+
+    loaded = ColPali.from_pretrained(
+        tmp_path,
+        local_files_only=True,
+        low_cpu_mem_usage=True,
+    )
+
+    assert not [
+        name
+        for name, parameter in loaded.named_parameters()
+        if parameter.device.type == "meta"
+    ]
+    assert (
+        loaded.model.get_input_embeddings().weight
+        is loaded.model.get_output_embeddings().weight
+    )
+    loaded.to("cpu")
+
+
 def test_tiny_model_resolves_only_language_and_projection_lora() -> None:
     model = ColPali(_tiny_config())
 

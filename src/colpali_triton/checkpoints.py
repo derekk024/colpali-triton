@@ -294,6 +294,24 @@ def _adapter_topology(model: nn.Module) -> Tuple[int, int]:
     return len(lora_a_names), parameter_count
 
 
+def _validate_materialized_model(model: nn.Module, label: str) -> None:
+    meta_parameters = tuple(
+        name
+        for name, parameter in model.named_parameters()
+        if parameter.device.type == "meta"
+    )
+    meta_buffers = tuple(
+        name
+        for name, buffer in model.named_buffers()
+        if buffer.device.type == "meta"
+    )
+    if meta_parameters or meta_buffers:
+        raise RuntimeError(
+            f"{label} contains unmaterialized meta tensors: "
+            f"parameters={meta_parameters!r}, buffers={meta_buffers!r}"
+        )
+
+
 def load_released_colpali(
     config: Phase7Config,
     *,
@@ -347,6 +365,7 @@ def load_released_colpali(
         config.runtime_base.repository,
         **model_kwargs,
     )
+    _validate_materialized_model(model, "loaded base")
     _validate_loaded_base(model, config)
     targets = resolve_lora_targets(model)
     if len(targets) != PAPER_LORA_TARGET_COUNT:
@@ -372,6 +391,7 @@ def load_released_colpali(
         local_files_only=local_files_only,
         is_trainable=False,
     )
+    _validate_materialized_model(adapted, "loaded adapter model")
     target_count, adapter_parameter_count = _adapter_topology(adapted)
     if target_count != PAPER_LORA_TARGET_COUNT:
         raise RuntimeError(
