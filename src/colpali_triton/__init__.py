@@ -42,6 +42,12 @@ from colpali_triton.synthetic import (
     SyntheticOverfitResult,
     run_synthetic_overfit,
 )
+from colpali_triton.triton_maxsim import (
+    DEFAULT_TRITON_MAXSIM_CONFIG,
+    TritonMaxSimConfig,
+    maxsim_triton,
+    triton_is_available,
+)
 from colpali_triton.vidore import (
     DatasetValidationError,
     RetrievalDataset,
@@ -61,6 +67,7 @@ __all__ = [
     "ColPaliProcessor",
     "DatasetValidationError",
     "DenseChunkMaxIndex",
+    "DEFAULT_TRITON_MAXSIM_CONFIG",
     "EncodingKind",
     "EvaluationResult",
     "LoRASpec",
@@ -76,6 +83,7 @@ __all__ = [
     "TextDocument",
     "TextQuery",
     "TrainabilityReport",
+    "TritonMaxSimConfig",
     "VidoreDatasetSpec",
     "VidoreManifest",
     "apply_lora",
@@ -90,10 +98,12 @@ __all__ = [
     "load_vidore_text_dataset",
     "maxsim",
     "maxsim_nested",
+    "maxsim_triton",
     "maxsim_vectorized",
     "rank_scores",
     "retrieval_metrics",
     "run_synthetic_overfit",
     "tokenize",
+    "triton_is_available",
 ]
 __version__ = "0.4.0"
