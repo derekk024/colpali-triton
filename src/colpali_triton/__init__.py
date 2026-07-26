@@ -1,5 +1,13 @@
 """Core components for the scoped ColPali reproduction."""
 
+from colpali_triton.adaptation import (
+    AdaptationMode,
+    LoRASpec,
+    TrainabilityReport,
+    apply_lora,
+    configure_frozen_backbone_ablation,
+    freeze_for_inference,
+)
 from colpali_triton.baselines import (
     BM25ChunkMaxIndex,
     DenseChunkMaxIndex,
@@ -15,6 +23,20 @@ from colpali_triton.metrics import (
     rank_scores,
     retrieval_metrics,
 )
+from colpali_triton.modeling import (
+    ColPaliBatch,
+    ColPaliEncoder,
+    EncodingKind,
+    MultiVectorEncoding,
+    RetrievalBackbone,
+    late_interaction_scores,
+)
+from colpali_triton.phase7_config import (
+    PHASE7_CONFIG,
+    Phase7Config,
+    load_phase7_config,
+)
+from colpali_triton.processing import ColPaliProcessor
 from colpali_triton.synthetic import (
     SyntheticOverfitConfig,
     SyntheticOverfitResult,
@@ -32,23 +54,39 @@ from colpali_triton.vidore import (
 )
 
 __all__ = [
+    "AdaptationMode",
     "BM25ChunkMaxIndex",
+    "ColPaliBatch",
+    "ColPaliEncoder",
+    "ColPaliProcessor",
     "DatasetValidationError",
     "DenseChunkMaxIndex",
+    "EncodingKind",
     "EvaluationResult",
+    "LoRASpec",
+    "MultiVectorEncoding",
+    "PHASE7_CONFIG",
+    "Phase7Config",
     "RetrievalDataset",
+    "RetrievalBackbone",
     "RetrievalMetrics",
     "SentenceTransformerTextEncoder",
     "SyntheticOverfitConfig",
     "SyntheticOverfitResult",
     "TextDocument",
     "TextQuery",
+    "TrainabilityReport",
     "VidoreDatasetSpec",
     "VidoreManifest",
+    "apply_lora",
     "chunk_text",
+    "configure_frozen_backbone_ablation",
     "evaluate_retrieval",
+    "freeze_for_inference",
     "hardest_in_batch_contrastive_loss",
+    "late_interaction_scores",
     "load_manifest",
+    "load_phase7_config",
     "load_vidore_text_dataset",
     "maxsim",
     "maxsim_nested",

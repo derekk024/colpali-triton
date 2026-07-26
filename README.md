@@ -2,14 +2,17 @@
 
 This repository is a scoped reproduction of
 [ColPali: Efficient Document Retrieval with Vision Language Models](https://arxiv.org/abs/2407.01449).
-The completed local milestones cover phases 1–6: paper analysis, project
+The completed local milestones cover phases 1–7: paper analysis, project
 scaffolding, nested-loop and vectorized PyTorch MaxSim, correctness and gradient
 tests, the paper's hardest-in-batch loss, and a controlled synthetic overfit
 proof, followed by pinned ViDoRe text loaders, retrieval metrics, and measured
-OCR-text baselines.
+OCR-text baselines, plus a paper-era PaliGemma/ColPali model, processor, and
+LoRA integration.
 
 Phase 6 uses a revision-pinned BGE-M3 checkpoint and remote, column-selective
-reads of two ViDoRe tasks. AWS resources and Triton kernels are not used yet.
+reads of two ViDoRe tasks. Phase 7 pins the public BF16 ViDoRe base and the
+original released adapter by full revision and weight digest. AWS resources
+and Triton kernels are not used yet.
 
 ## Current implementation
 
@@ -43,8 +46,8 @@ scores = maxsim(queries, documents)
 assert scores.shape == (1, 2)
 ```
 
-The scorer deliberately does not L2-normalize its inputs. The future model
-encoder will normalize projected embeddings once, before indexing or scoring.
+The scorer deliberately does not L2-normalize its inputs. The model encoder
+normalizes projected embeddings once, before indexing or scoring.
 The final query-token reduction accumulates in float32 for float16, bfloat16,
 and float32 inputs, and in float64 for float64 inputs.
 
@@ -128,6 +131,56 @@ Unstructured plus Claude-captioned text pipeline. Full quality, latency,
 throughput, memory, index-size, provenance, and truncation details are in
 [the Phase 6 baseline report](reports/phase_6_text_baselines.md).
 
+## Phase 7 multimodal integration
+
+The retrieval model uses the final PaliGemma hidden state, a shared biased
+`2048 → 128` projection, per-position L2 normalization, and exact-zero masked
+positions. Documents use the prompt `Describe the image.` and retain 1,024
+image positions plus six prompt positions. Queries use the `Question: ` prefix,
+five adjacent `<unused0>` augmentation tokens, and no image positions after
+preprocessing.
+
+The paper LoRA topology is reproduced with rank 32, alpha 32, dropout 0.1,
+Gaussian initialization, and adapters on all language-model attention/MLP
+linear layers plus the retrieval projection. The vision tower and multimodal
+projector remain frozen. The released adapter was independently verified to
+contain 127 LoRA A/B pairs and 39,292,928 adapter parameters.
+
+```python
+import torch
+from PIL import Image
+
+from colpali_triton import late_interaction_scores, load_phase7_config
+from colpali_triton.checkpoints import load_released_colpali
+
+config = load_phase7_config("configs/colpali_phase7.json")
+released = load_released_colpali(
+    config,
+    cache_dir="artifacts/huggingface_phase7",
+    device="mps",
+)
+
+page = Image.open("page.png")
+document_batch = released.processor.process_documents([page]).to(
+    released.device,
+    pixel_dtype=released.dtype,
+)
+query_batch = released.processor.process_queries(
+    ["Which total is shown?"]
+).to(released.device)
+
+with torch.inference_mode():
+    documents = released.model(**document_batch.as_model_inputs())
+    queries = released.model(**query_batch.as_model_inputs())
+    scores = late_interaction_scores(queries, documents)
+```
+
+Loading verifies approximately 5.93 GB of pinned public base and adapter
+weights before inference. The gated Google checkpoint in the manifest is a
+source reference, not a claim that its current revision is the paper's original
+training revision. See [the Phase 7 integration report](reports/phase_7_model_integration.md)
+for the exact revisions, contracts, checks, and remaining Phase 8 boundary.
+
 ## Local setup
 
 Python 3.9 or newer is supported.
@@ -147,6 +200,19 @@ Use a clean virtual environment for benchmark measurements. A
 its unrelated packages can make `pip check` fail and are recorded as an
 environment limitation in the local report.
 
+For the Phase 7 multimodal code and released checkpoint, create a clean
+environment with the newer pinned constraints:
+
+```bash
+python3 -m venv .venv-phase7
+source .venv-phase7/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -c configs/phase7_macos_arm64_constraints.txt \
+  -e ".[test,evaluation,multimodal]"
+python -m pip check
+python -m pytest
+```
+
 Run one measured baseline from the project root:
 
 ```bash
@@ -165,8 +231,8 @@ explicitly supplied.
 ## Repository layout
 
 ```text
-src/colpali_triton/       scorers, loss, loaders, metrics, and baselines
-tests/                    unit, gradient, loader, retrieval, and overfit tests
+src/colpali_triton/       scorers, models, processing, loaders, and metrics
+tests/                    unit, gradient, integration-contract, and overfit tests
 reports/                  paper notes, implementation plan, and recorded results
 configs/                  committed experiment settings and thresholds
 scripts/                  reproducible experiment entry points
@@ -178,5 +244,6 @@ for paper-derived requirements, assumptions, and the boundary between reported
 paper results and this reproduction's future measurements. The historical
 phases 1–4 run remains in [the original local test report](reports/local_test_results.md);
 the phase-5 experiment is in [its test report](reports/phase_5_test_results.md);
-and the latest complete suite is recorded in
-[the Phase 6 test report](reports/phase_6_test_results.md).
+the Phase 6 baseline suite is in
+[its test report](reports/phase_6_test_results.md); and the latest complete
+suite is recorded in [the Phase 7 test report](reports/phase_7_test_results.md).
