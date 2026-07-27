@@ -84,7 +84,8 @@ def validate_result_contract(
             observed[f"{name}_sha256"] = _sha256(path)
         except OSError as exc:
             errors.append(
-                f"{name}: OSError errno={getattr(exc, 'errno', None)}"
+                f"{name}: {type(exc).__name__} "
+                f"errno={getattr(exc, 'errno', None)}"
             )
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             errors.append(f"{name}: {type(exc).__name__}: {exc}")

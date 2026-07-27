@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -939,3 +940,82 @@ def test_l4_hardware_gate_rejects_wrong_gpu(
 
     assert result["status"] == "failed"
     assert any("expected 'NVIDIA L4'" in item for item in result["blockers"])
+
+
+def test_incomplete_contract_replays_identically_under_new_root(
+    tmp_path: Path,
+) -> None:
+    remote_root = tmp_path / "remote-host" / "phase11-incomplete"
+    remote_root.mkdir(parents=True)
+    stored = workflow.validate_result_contract(
+        remote_root,
+        source_commit=SOURCE_COMMIT,
+    )
+    assert stored["status"] == "failed"
+    assert stored["errors"] == [
+        "tuning: FileNotFoundError errno=2",
+        "winner: FileNotFoundError errno=2",
+        "derived_config: FileNotFoundError errno=2",
+        "benchmark: FileNotFoundError errno=2",
+    ]
+    (remote_root / "result_contract_validation.json").write_text(
+        json.dumps(stored, sort_keys=True) + "\n"
+    )
+    payload = remote_root / "diagnostic.log"
+    payload.write_text("tuning failed before producing an output\n")
+    profiling = {
+        "succeeded": False,
+        "profiler": None,
+        "report": None,
+        "metadata": None,
+        "winner_record": None,
+        "winner_record_sha256": None,
+        "attempts": [],
+    }
+    files = []
+    for path in sorted(remote_root.iterdir()):
+        files.append(
+            {
+                "path": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    manifest = {
+        "format": "colpali-triton-phase11-artifact-manifest-v2",
+        "sealed_at": "2026-07-26T00:00:00Z",
+        "status": "incomplete",
+        "failure_reasons": ["mandatory step failed: tuning"],
+        "profiling": profiling,
+        "steps": {
+            "tuning": {
+                "exit_code": 1,
+                "succeeded": False,
+            }
+        },
+        "source_commit": SOURCE_COMMIT,
+        "run_id": "phase11-incomplete",
+        "files": files,
+    }
+    manifest_path = remote_root / "artifact_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    (remote_root / "SEALED.sha256").write_text(
+        f"{manifest_sha}  artifact_manifest.json\n"
+    )
+
+    local_root = tmp_path / "retrieved-elsewhere" / "phase11-incomplete"
+    shutil.copytree(remote_root, local_root)
+    recomputed = workflow.validate_result_contract(
+        local_root,
+        source_commit=SOURCE_COMMIT,
+    )
+
+    assert recomputed == stored
+    _, _, status, reasons = workflow._verify_artifact_manifest(
+        local_root,
+        source_commit=SOURCE_COMMIT,
+        run_id="phase11-incomplete",
+    )
+    assert status == "incomplete"
+    assert reasons == ["mandatory step failed: tuning"]
