@@ -40,6 +40,11 @@ HOST_PATTERN = re.compile(
 )
 USER_PATTERN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+RESERVED_RUN_ID_SUFFIXES = (
+    ".control",
+    ".tar.gz",
+    ".tar.gz.sha256",
+)
 IMAGE_PATTERN = re.compile(
     r"^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+$"
 )
@@ -640,6 +645,10 @@ def _spec_from_args(
     )
     if not RUN_ID_PATTERN.fullmatch(run_id):
         raise WorkflowError("--run-id must contain 1-80 safe characters")
+    if run_id.endswith(RESERVED_RUN_ID_SUFFIXES):
+        raise WorkflowError(
+            "--run-id uses a suffix reserved for remote workflow artifacts"
+        )
     image_name = args.image_name or (
         f"colpali-triton:phase11-{source_commit[:12]}"
     )

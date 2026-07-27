@@ -210,18 +210,17 @@ def _cleanup_containers(
     run_id: str,
     source_commit: str,
 ) -> dict[str, Any]:
+    label_filters = (
+        "ps",
+        "-aq",
+        "--filter",
+        f"label=colpali.phase11.run_id={run_id}",
+        "--filter",
+        f"label=colpali.phase11.source_commit={source_commit}",
+    )
     candidates: set[str] = set()
     errors: list[str] = []
-    listed = _docker(
-        (
-            "ps",
-            "-aq",
-            "--filter",
-            f"label=colpali.phase11.run_id={run_id}",
-            "--filter",
-            f"label=colpali.phase11.source_commit={source_commit}",
-        )
-    )
+    listed = _docker(label_filters)
     if listed is None:
         errors.append("bounded docker label query failed")
     elif listed.returncode != 0:
@@ -259,7 +258,31 @@ def _cleanup_containers(
         else:
             errors.append(f"failed to remove labeled container: {container_id}")
 
-    if cid_directory.is_dir():
+    remaining: list[str] = []
+    verified = _docker(label_filters)
+    if verified is None:
+        errors.append("bounded final docker label query failed")
+    elif verified.returncode != 0:
+        errors.append("final docker label query returned a nonzero status")
+    else:
+        verified_tokens = verified.stdout.split()
+        remaining = sorted(
+            item
+            for item in verified_tokens
+            if CONTAINER_ID_PATTERN.fullmatch(item)
+        )
+        if len(remaining) != len(verified_tokens):
+            errors.append("final docker label query returned an invalid ID")
+        if remaining:
+            errors.append("labeled containers remain after cleanup")
+    safe_to_seal = (
+        verified is not None
+        and verified.returncode == 0
+        and len(remaining) == len(verified.stdout.split())
+        and not remaining
+    )
+
+    if safe_to_seal and cid_directory.is_dir():
         for cid_file in cid_directory.glob("*.cid"):
             cid_file.unlink(missing_ok=True)
         try:
@@ -279,6 +302,8 @@ def _cleanup_containers(
         },
         "removed_container_ids": removed,
         "skipped_unmatched_container_ids": skipped,
+        "remaining_labeled_container_ids": remaining,
+        "safe_to_seal": safe_to_seal,
         "errors": errors,
     }
 
@@ -409,7 +434,6 @@ def finalize(args: argparse.Namespace) -> dict[str, Any]:
         ):
             return {"status": "already_sealed"}
 
-        quarantined = _quarantine_partial_contracts(args.result_directory)
         cleanup = _cleanup_containers(
             args.result_directory,
             run_id=args.run_id,
@@ -417,6 +441,16 @@ def finalize(args: argparse.Namespace) -> dict[str, Any]:
         )
         cleanup["recovery_source"] = args.recovery_source
         cleanup["job_exit_code"] = args.job_exit_code
+        _atomic_json(
+            args.result_directory / "emergency_container_cleanup.json",
+            cleanup,
+        )
+        if cleanup.get("safe_to_seal") is not True:
+            raise FinalizationError(
+                "cannot seal while exact-run container cleanup is unverified"
+            )
+
+        quarantined = _quarantine_partial_contracts(args.result_directory)
         cleanup["quarantined_contract_files"] = quarantined
         _atomic_json(
             args.result_directory / "emergency_container_cleanup.json",

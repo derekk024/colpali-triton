@@ -558,6 +558,35 @@ def _finalizer_args(tmp_path: Path) -> SimpleNamespace:
     )
 
 
+@pytest.mark.parametrize(
+    "run_id",
+    (
+        "other-run.control",
+        "other-run.tar.gz",
+        "other-run.tar.gz.sha256",
+    ),
+)
+def test_run_id_cannot_alias_another_runs_remote_artifacts(
+    tmp_path: Path,
+    run_id: str,
+) -> None:
+    args = SimpleNamespace(
+        host="203.0.113.10",
+        user="ubuntu",
+        port=22,
+        identity_file=(tmp_path / "benchmark.pem").resolve(),
+        launch_receipt=(tmp_path / "launch.json").resolve(),
+        local_result_base=(tmp_path / "local").resolve(),
+        remote_source_base="/home/ubuntu/colpali-triton",
+        remote_result_base="/home/ubuntu/colpali-phase11-results",
+        run_id=run_id,
+        image_name=None,
+    )
+
+    with pytest.raises(workflow.WorkflowError, match="reserved"):
+        workflow._spec_from_args(args, SOURCE_COMMIT, None)
+
+
 def _write_manifest(
     root: Path,
     *,
@@ -1301,6 +1330,8 @@ def test_recovery_finalizer_seals_verifiable_incomplete_bundle_idempotently(
             "scope": {},
             "removed_container_ids": [],
             "skipped_unmatched_container_ids": [],
+            "remaining_labeled_container_ids": [],
+            "safe_to_seal": True,
             "errors": [],
         }
 
@@ -1365,6 +1396,8 @@ def test_recovery_finalizer_does_not_preserve_wrong_identity_seal(
             "scope": {},
             "removed_container_ids": [],
             "skipped_unmatched_container_ids": [],
+            "remaining_labeled_container_ids": [],
+            "safe_to_seal": True,
             "errors": [],
         },
     )
@@ -1391,12 +1424,14 @@ def test_emergency_cleanup_removes_only_exactly_labeled_containers(
     (cid_directory / "matching.cid").write_text(matching)
     (cid_directory / "mismatched.cid").write_text(mismatched)
     calls = []
+    removed = set()
 
     def fake_docker(arguments):
         arguments = tuple(arguments)
         calls.append(arguments)
         if arguments[:2] == ("ps", "-aq"):
-            return subprocess.CompletedProcess(arguments, 0, matching + "\n", "")
+            output = "" if matching in removed else matching + "\n"
+            return subprocess.CompletedProcess(arguments, 0, output, "")
         if arguments[0] == "inspect":
             labels = (
                 "phase11-test\t" + SOURCE_COMMIT
@@ -1405,6 +1440,7 @@ def test_emergency_cleanup_removes_only_exactly_labeled_containers(
             )
             return subprocess.CompletedProcess(arguments, 0, labels + "\n", "")
         if arguments[:2] == ("rm", "--force"):
+            removed.add(arguments[-1])
             return subprocess.CompletedProcess(arguments, 0, "", "")
         raise AssertionError(arguments)
 
@@ -1418,10 +1454,97 @@ def test_emergency_cleanup_removes_only_exactly_labeled_containers(
 
     assert cleanup["removed_container_ids"] == [matching]
     assert cleanup["skipped_unmatched_container_ids"] == [mismatched]
+    assert cleanup["remaining_labeled_container_ids"] == []
+    assert cleanup["safe_to_seal"] is True
+    assert not cid_directory.exists()
     query = calls[0]
     assert "label=colpali.phase11.run_id=phase11-test" in query
     assert f"label=colpali.phase11.source_commit={SOURCE_COMMIT}" in query
     assert ("rm", "--force", mismatched) not in calls
+
+
+def test_recovery_finalizer_refuses_unverified_container_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    args = _finalizer_args(tmp_path)
+    monkeypatch.setattr(
+        finalizer,
+        "_cleanup_containers",
+        lambda *args, **kwargs: {
+            "format": "colpali-triton-phase11-emergency-cleanup-v1",
+            "recorded_at": "2026-07-26T00:00:00Z",
+            "scope": {},
+            "removed_container_ids": [],
+            "skipped_unmatched_container_ids": [],
+            "remaining_labeled_container_ids": ["a" * 64],
+            "safe_to_seal": False,
+            "errors": ["labeled containers remain after cleanup"],
+        },
+    )
+
+    with pytest.raises(
+        finalizer.FinalizationError,
+        match="cleanup is unverified",
+    ):
+        finalizer.finalize(args)
+
+    assert not (args.result_directory / "SEALED.sha256").exists()
+    cleanup = json.loads(
+        (
+            args.result_directory / "emergency_container_cleanup.json"
+        ).read_text()
+    )
+    assert cleanup["safe_to_seal"] is False
+
+
+def test_cleanup_retains_cidfiles_when_final_label_query_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "result"
+    cid_directory = root / ".docker-cids"
+    cid_directory.mkdir(parents=True)
+    container_id = "a" * 64
+    cid_file = cid_directory / "tuning.cid"
+    cid_file.write_text(container_id)
+    query_count = 0
+
+    def fake_docker(arguments):
+        nonlocal query_count
+        arguments = tuple(arguments)
+        if arguments[:2] == ("ps", "-aq"):
+            query_count += 1
+            if query_count == 1:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    container_id + "\n",
+                    "",
+                )
+            return None
+        if arguments[0] == "inspect":
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                "phase11-test\t" + SOURCE_COMMIT + "\n",
+                "",
+            )
+        if arguments[:2] == ("rm", "--force"):
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(finalizer, "_docker", fake_docker)
+
+    cleanup = finalizer._cleanup_containers(
+        root,
+        run_id="phase11-test",
+        source_commit=SOURCE_COMMIT,
+    )
+
+    assert cleanup["safe_to_seal"] is False
+    assert "bounded final docker label query failed" in cleanup["errors"]
+    assert cid_file.is_file()
 
 
 def test_remote_control_contract_binds_launch_receipt_and_host(
