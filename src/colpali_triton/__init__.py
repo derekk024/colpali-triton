@@ -106,4 +106,4 @@ __all__ = [
     "tokenize",
     "triton_is_available",
 ]
-__version__ = "0.5.0"
+__version__ = "0.6.0"

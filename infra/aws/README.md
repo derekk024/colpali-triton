@@ -19,7 +19,7 @@ is not a GPU benchmark environment.
 
 ## Prerequisites
 
-Before spending anything, supply all four placement/access values explicitly:
+Before spending anything, supply all four launch-placement values explicitly:
 
 - an AWS region where the chosen G6 type is available and your account has
   quota;
@@ -31,6 +31,8 @@ The tool never falls back to a default VPC or default security group. A public
 IPv4 address is disabled unless `--associate-public-ip` is explicit. Check the
 current on-demand EC2 and EBS prices for the exact region before launch; this
 repository intentionally does not freeze a price that will become stale.
+Running Phase 11 also requires a reachable public or private SSH route and the
+matching local private-key path.
 
 AWS CLI v1 or v2 is supported. Configure credentials outside the repository.
 No credential, private key, token, or provider cache belongs in Git.
@@ -79,8 +81,11 @@ Execution resolves and verifies the Amazon-owned DLAMI, performs AWS's
 permission dry-run, launches exactly one on-demand instance, and writes an
 ignored receipt to `artifacts/phase10/aws_launch_receipt.json`. The receipt
 contains the immutable AMI, idempotency token, configuration fingerprint,
-source commit, user-data digest, instance response, and exact container pins.
-It refuses to overwrite an existing receipt.
+source commit, user-data digest, owning AWS account, instance response, and
+exact container pins. It refuses to overwrite an existing receipt.
+Before any AWS operation, execution requires a clean, resolvable 40-character
+Git `HEAD`; it rechecks that source and the user-data digest immediately before
+`run-instances` and records the captured commit in the receipt.
 
 Cloud-init checks the DLAMI's NVIDIA driver, Docker, and NVIDIA Container
 Toolkit; configures the Docker GPU runtime; pulls the digest-pinned base; and
@@ -144,11 +149,17 @@ First print the complete offline plan. This makes no AWS, SSH, or SCP call:
 python3 infra/aws/phase11_remote.py \
   --host 203.0.113.10 \
   --identity-file /absolute/path/to/key.pem \
+  --launch-receipt artifacts/phase10/aws_launch_receipt.json \
   --run-id phase11-l4-20260726
 ```
 
-The plan blocks a dirty worktree, a missing private-key file, an existing
-local result directory, and unsafe paths. Omit `--run-id` to derive a unique
+The launch-receipt flag is shown explicitly; that ignored path is also the
+default. The plan blocks a dirty worktree, a missing or mismatched launch
+receipt, a missing private-key file, an existing local result directory, and
+unsafe paths. The receipt must bind the current `HEAD` and environment
+contract to the same AWS account, region, AMI, instance, subnet, and security
+group that were launched. The host later proves those facts through IMDS, and
+local retrieval recomputes the validation. Omit `--run-id` to derive a unique
 UTC-stamped ID from the source commit.
 
 Run that plan with the explicit execution acknowledgement:
@@ -157,6 +168,7 @@ Run that plan with the explicit execution acknowledgement:
 python3 infra/aws/phase11_remote.py \
   --host 203.0.113.10 \
   --identity-file /absolute/path/to/key.pem \
+  --launch-receipt artifacts/phase10/aws_launch_receipt.json \
   --run-id phase11-l4-20260726 \
   --execute \
   --acknowledge-run "RUN PHASE 11 ON THIS EXISTING INSTANCE"
@@ -202,11 +214,25 @@ matches the tuning winner. Only those two bounded profiler containers receive
 `SYS_ADMIN`, as NVIDIA's counter collection requires; no test, tuning, or
 benchmark container gets that capability, and no container is privileged.
 
-Every run is sealed and retrieved even when build, tests, tuning, benchmark, or
-profiling fails. Such a manifest has `status: "incomplete"` with exact failure
-reasons, and the local command returns nonzero only after verified retrieval.
-`SEALED.sha256` means the diagnostic bundle is immutable; it does not claim
-that Phase 11 passed.
+The paid job runs in a detached, commit/run-specific systemd unit and has a
+four-hour hard cap. SSH control calls and source upload, bundle creation, and
+artifact download each have explicit bounds; a transient disconnect can be
+resumed with the same run ID.
+
+After the remote result directory exists, ordinary step failures and bounded
+job exits are sealed and retrieved. The detached wrapper invokes a separately
+bounded, locked recovery finalizer whenever the normal job exits without a
+valid seal. It removes only containers carrying the exact run and source
+labels, quarantines partial contract files, records an explicitly incomplete
+result, and publishes `SEALED.sha256` atomically last. Both normal sealing and
+recovery require a final exact-label query proving that no container from the
+run remains; a query or removal uncertainty keeps the cidfiles and result
+unsealed for retry. Polling can invoke the same idempotent recovery after a
+client disconnect. If recovery itself cannot produce a verifiable seal, the
+workflow fails closed and leaves the same run ID available for diagnosis
+rather than claiming retrieval. An incomplete local command returns nonzero
+after verified retrieval. `SEALED.sha256` means the diagnostic bundle is
+immutable; it does not claim that Phase 11 passed.
 
 This workflow never launches, stops, or terminates an EC2 instance. In
 particular, successful retrieval deliberately leaves the host running so the
@@ -226,7 +252,10 @@ python3 infra/aws/l4_lifecycle.py terminate \
 Execution requires the target ID twice. Before any mutation, it describes the
 instance and refuses to proceed unless `Project`, `Phase`, and `ManagedBy`
 exactly match this component's contract. It then performs an AWS permission
-dry-run and writes a local termination receipt:
+dry-run, requests termination, waits until AWS reports `terminated`, and
+writes a local termination receipt containing the final observed state. A
+wait failure or timeout still writes an unconfirmed receipt and exits
+nonzero; it never reports termination as confirmed from the request alone:
 
 ```bash
 python3 infra/aws/l4_lifecycle.py terminate \

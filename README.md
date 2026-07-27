@@ -11,9 +11,12 @@ container, guarded AWS L4 workflow, and benchmark harness.
 
 Phase 6 uses a revision-pinned BGE-M3 checkpoint and remote, column-selective
 reads of two ViDoRe tasks. Phase 7 pins the public BF16 ViDoRe base and the
-original released adapter by full revision and weight digest. The Phase 11
-Triton forward kernel is implemented and CUDA-gated tests are committed, but
-it has not yet run on NVIDIA hardware. No AWS resources have been created.
+original released adapter by full revision and weight digest. Phase 11 is
+fully prepared locally: the Triton forward kernel, bounded tuning matrix,
+tuned-winner benchmark handoff, profiler contract, and immutable remote result
+retrieval are committed. GPU evidence is bound to the exact lifecycle launch
+receipt and independently rechecked against EC2 instance metadata. The kernel
+has not yet run on NVIDIA hardware. No AWS resources have been created.
 
 ## Completion status
 
@@ -22,7 +25,7 @@ NVIDIA run followed by the final report.
 
 | Acceptance item | Status |
 | --- | --- |
-| Local unit suite | Complete: 510 passed |
+| Local unit suite | Complete: 664 passed |
 | Nested-loop/vectorized PyTorch parity and gradients | Complete |
 | Controlled synthetic overfit | Complete |
 | Two real retrieval baselines | Complete |
@@ -268,25 +271,50 @@ python3 infra/aws/l4_lifecycle.py plan \
 `launch` remains offline unless both `--execute` and the exact cost
 acknowledgement are supplied. Execution resolves and records an immutable
 Amazon-owned GPU DLAMI, performs AWS permission dry-runs, launches one tagged
-instance, and writes a protected receipt. Termination requires the exact
+instance, and writes a protected receipt. Phase 11 accepts only a receipt that
+matches the current source commit, environment contract, AWS account, region,
+AMI, instance, subnet, and security group. Termination requires the exact
 instance ID twice and verifies all managed tags before mutation. See
 [the AWS L4 guide](infra/aws/README.md) for launch, deployment, status, and
 termination commands.
 
-The canonical benchmark fixes six ColPali-shaped workloads, FP16 and BF16,
-PyTorch and Triton providers, numerical tolerances, 10 warmups, five trials of
-50 CUDA-event measurements, and the exact Triton launch configuration
-`query=16`, `document=64`, `dimension=128`, four warps, and two stages.
+The tuning pass fixes 12 explicit launch candidates across four representative
+shapes and FP16/BF16. It performs 12,000 bounded CUDA-event measurements after
+96 cold correctness gates and 960 warmups. The selected winner is validated
+with the production schema, then substituted into the full six-shape,
+two-dtype PyTorch-versus-Triton benchmark. The profiler must use that same
+winner.
 
 ```bash
 python benchmarks/benchmark_maxsim.py --preflight
+python benchmarks/tune_triton_maxsim.py --preflight
 python benchmarks/benchmark_maxsim.py
 ```
 
 The local preflight correctly reports that this Mac lacks a CUDA PyTorch build
-and Triton runtime. The full command must run inside the pinned NVIDIA
-container before any GPU correctness or performance claim is valid. See
-[the Phase 10 readiness report](reports/phase_10_gpu_preparation.md) and
+and Triton runtime. Given the matching launch receipt and a bootstrapped L4
+host, the fail-closed remote workflow deploys clean committed source, proves
+all five CUDA parity cases ran without skips, tunes, benchmarks the winner,
+captures one real Nsight report, retrieves and independently verifies the
+sealed bundle, and leaves termination as a separate guarded action. First
+print its offline plan:
+
+```bash
+python3 infra/aws/phase11_remote.py \
+  --host 203.0.113.10 \
+  --identity-file /absolute/path/to/key.pem \
+  --launch-receipt artifacts/phase10/aws_launch_receipt.json
+```
+
+Execution is detached and resumable, with a four-hour job cap. An independent
+recovery finalizer cleans only containers labeled for the exact run, proves
+none remain, and seals an interrupted run as `incomplete` before retrieval.
+See the AWS guide for the separate execution acknowledgement and termination
+command.
+
+The full workflow must run before any GPU correctness or performance claim is
+valid. See [the Phase 11 preflight report](reports/phase_11_preflight.md),
+[the AWS L4 guide](infra/aws/README.md), and
 [the benchmark protocol](benchmarks/README.md).
 
 ## Local setup
@@ -355,6 +383,8 @@ paper results and this reproduction's future measurements. The historical
 phases 1–4 run remains in [the original local test report](reports/local_test_results.md);
 the phase-5 experiment is in [its test report](reports/phase_5_test_results.md);
 the Phase 6 baseline suite is in
-[its test report](reports/phase_6_test_results.md); and the latest complete
-local verification and remaining NVIDIA gate are recorded in
-[the Phase 10 readiness report](reports/phase_10_gpu_preparation.md).
+[its test report](reports/phase_6_test_results.md); the historical Phase 10
+environment decision is in
+[the Phase 10 readiness report](reports/phase_10_gpu_preparation.md); and the
+latest complete local verification and remaining NVIDIA gate are in
+[the Phase 11 preflight report](reports/phase_11_preflight.md).
