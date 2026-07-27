@@ -38,5 +38,14 @@ mlruns/
 
 # Credentials and provider caches
 .aws/
+.ssh/
 .cache/
 huggingface/
+*.key
+*.p12
+*.pem
+id_ed25519*
+id_rsa*
+
+# Archive-deployment provenance marker
+.source_commit

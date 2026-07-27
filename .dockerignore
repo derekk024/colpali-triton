@@ -10,6 +10,7 @@ __pycache__
 .env
 .env.*
 .aws
+.ssh
 .cache
 artifacts
 build
@@ -24,6 +25,11 @@ models
 outputs
 wandb
 *.ckpt
+*.key
+*.p12
+*.pem
 *.pt
 *.pth
 *.safetensors
+id_ed25519*
+id_rsa*
