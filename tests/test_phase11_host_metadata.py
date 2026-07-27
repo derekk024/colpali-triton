@@ -13,6 +13,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = PROJECT_ROOT / "infra" / "aws" / "phase11_host_metadata.py"
 SOURCE_COMMIT = "a" * 40
 IMAGE_NAME = "colpali-triton:phase11-test"
+EXPECTED_INSTANCE_ID = "i-0123456789abcdef0"
+EXPECTED_INSTANCE_TYPE = "g6.xlarge"
+EXPECTED_REGION = "us-west-2"
+EXPECTED_AMI_ID = "ami-0123456789abcdef0"
+EXPECTED_ACCOUNT_ID = "123456789012"
 
 
 def _load_module():
@@ -35,6 +40,18 @@ def _contract() -> dict:
     assert evidence["available"] is True
     assert contract is not None
     return contract
+
+
+def _validate(record: dict) -> dict:
+    return host_metadata.validate_host_evidence(
+        record,
+        _contract(),
+        expected_instance_id=EXPECTED_INSTANCE_ID,
+        expected_instance_type=EXPECTED_INSTANCE_TYPE,
+        expected_region=EXPECTED_REGION,
+        expected_ami_id=EXPECTED_AMI_ID,
+        expected_account_id=EXPECTED_ACCOUNT_ID,
+    )
 
 
 def _successful_command(stdout: str) -> dict:
@@ -93,14 +110,14 @@ def _valid_record() -> dict:
         "ec2": {
             "available": True,
             "identity_document": {
-                "accountId": "123456789012",
+                "accountId": EXPECTED_ACCOUNT_ID,
                 "architecture": "x86_64",
                 "availabilityZone": "us-west-2a",
-                "imageId": "ami-0123456789abcdef0",
-                "instanceId": "i-0123456789abcdef0",
-                "instanceType": "g6.xlarge",
+                "imageId": EXPECTED_AMI_ID,
+                "instanceId": EXPECTED_INSTANCE_ID,
+                "instanceType": EXPECTED_INSTANCE_TYPE,
                 "privateIp": "10.0.0.5",
-                "region": "us-west-2",
+                "region": EXPECTED_REGION,
                 "version": "2017-09-30",
             },
         },
@@ -141,10 +158,7 @@ def test_committed_environment_contract_is_strict_and_loadable() -> None:
 
 
 def test_exact_g6_l4_host_and_container_evidence_passes() -> None:
-    result = host_metadata.validate_host_evidence(
-        _valid_record(),
-        _contract(),
-    )
+    result = _validate(_valid_record())
 
     assert result["status"] == "passed"
     assert result["errors"] == []
@@ -153,6 +167,8 @@ def test_exact_g6_l4_host_and_container_evidence_passes() -> None:
         "g6.xlarge",
     ]
     assert result["expected"]["source_commit"] == SOURCE_COMMIT
+    assert result["expected"]["instance_id"] == EXPECTED_INSTANCE_ID
+    assert result["expected"]["ami_id"] == EXPECTED_AMI_ID
 
 
 def test_new_region_prefix_and_non_rfc1918_vpc_address_pass() -> None:
@@ -162,7 +178,15 @@ def test_new_region_prefix_and_non_rfc1918_vpc_address_pass() -> None:
     identity["availabilityZone"] = "eusc-de-east-1a"
     identity["privateIp"] = "100.64.0.10"
 
-    result = host_metadata.validate_host_evidence(record, _contract())
+    result = host_metadata.validate_host_evidence(
+        record,
+        _contract(),
+        expected_instance_id=EXPECTED_INSTANCE_ID,
+        expected_instance_type=EXPECTED_INSTANCE_TYPE,
+        expected_region="eusc-de-east-1",
+        expected_ami_id=EXPECTED_AMI_ID,
+        expected_account_id=EXPECTED_ACCOUNT_ID,
+    )
 
     assert result["status"] == "passed"
     assert result["errors"] == []
@@ -173,9 +197,43 @@ def test_both_scoped_g6_instance_types_pass(instance_type: str) -> None:
     record = _valid_record()
     record["ec2"]["identity_document"]["instanceType"] = instance_type
 
-    result = host_metadata.validate_host_evidence(record, _contract())
+    result = host_metadata.validate_host_evidence(
+        record,
+        _contract(),
+        expected_instance_id=EXPECTED_INSTANCE_ID,
+        expected_instance_type=instance_type,
+        expected_region=EXPECTED_REGION,
+        expected_ami_id=EXPECTED_AMI_ID,
+        expected_account_id=EXPECTED_ACCOUNT_ID,
+    )
 
     assert result["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    (
+        ("instanceId", "i-11111111111111111", "instance ID does not match"),
+        ("instanceType", "g6.2xlarge", "instance type does not match"),
+        ("region", "us-east-1", "region does not match"),
+        ("imageId", "ami-11111111111111111", "AMI ID does not match"),
+        ("accountId", "210987654321", "account ID does not match"),
+    ),
+)
+def test_host_gate_binds_imds_to_the_launch_receipt(
+    field: str,
+    value: str,
+    expected_error: str,
+) -> None:
+    record = _valid_record()
+    record["ec2"]["identity_document"][field] = value
+    if field == "region":
+        record["ec2"]["identity_document"]["availabilityZone"] = f"{value}a"
+
+    result = _validate(record)
+
+    assert result["status"] == "failed"
+    assert any(expected_error in error for error in result["errors"])
 
 
 def _imds_missing(record: dict) -> None:
@@ -249,7 +307,7 @@ def test_host_gate_rejects_missing_or_mismatched_evidence(
     record = deepcopy(_valid_record())
     mutate(record)
 
-    result = host_metadata.validate_host_evidence(record, _contract())
+    result = _validate(record)
 
     assert result["status"] == "failed"
     assert any(expected_error in error for error in result["errors"])
@@ -272,7 +330,7 @@ def test_every_required_docker_provenance_label_is_enforced(
     image[0]["Config"]["Labels"][label] = "mismatch"
     record["docker_image"]["stdout"] = json.dumps(image)
 
-    result = host_metadata.validate_host_evidence(record, _contract())
+    result = _validate(record)
 
     assert result["status"] == "failed"
     assert f"Docker image label {label} does not match" in result["errors"]
@@ -298,7 +356,7 @@ def test_every_pinned_bootstrap_container_fact_is_enforced(
     record = _valid_record()
     record["bootstrap"]["record"]["container"][field] = value
 
-    result = host_metadata.validate_host_evidence(record, _contract())
+    result = _validate(record)
 
     assert result["status"] == "failed"
     assert any(expected_error in error for error in result["errors"])
@@ -331,6 +389,11 @@ def test_main_always_writes_failed_evidence_before_nonzero_exit(
             source_commit=SOURCE_COMMIT,
             run_id="phase11-test",
             image_name=IMAGE_NAME,
+            expected_instance_id=EXPECTED_INSTANCE_ID,
+            expected_instance_type=EXPECTED_INSTANCE_TYPE,
+            expected_region=EXPECTED_REGION,
+            expected_ami_id=EXPECTED_AMI_ID,
+            expected_account_id=EXPECTED_ACCOUNT_ID,
             bootstrap_environment=missing_bootstrap,
         ),
     )

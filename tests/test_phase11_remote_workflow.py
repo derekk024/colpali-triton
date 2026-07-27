@@ -16,6 +16,9 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = PROJECT_ROOT / "infra" / "aws" / "phase11_remote.py"
+FINALIZER_PATH = (
+    PROJECT_ROOT / "infra" / "aws" / "phase11_finalize_artifacts.py"
+)
 JOB_PATH = PROJECT_ROOT / "infra" / "aws" / "run_phase11_job.sh"
 PROFILE_PATH = (
     PROJECT_ROOT / "infra" / "aws" / "profile_phase11_maxsim.py"
@@ -32,7 +35,17 @@ DERIVE_WINNER_PATH = (
 L4_ASSERTION_PATH = (
     PROJECT_ROOT / "infra" / "aws" / "assert_phase11_l4.py"
 )
+CONFIG_PATH = PROJECT_ROOT / "infra" / "aws" / "l4_environment.json"
 SOURCE_COMMIT = "a" * 40
+EXPECTED_INSTANCE_ID = "i-0123456789abcdef0"
+EXPECTED_INSTANCE_TYPE = "g6.xlarge"
+EXPECTED_REGION = "us-west-2"
+EXPECTED_AMI_ID = "ami-0123456789abcdef0"
+EXPECTED_ACCOUNT_ID = "123456789012"
+LAUNCH_RECEIPT_SHA256 = "b" * 64
+EXPECTED_CONFIG_FINGERPRINT = (
+    "b06d77f646da2d73eed72f171908f2232aae9b1e3c1ec9c3badf4b124817c6be"
+)
 
 
 def _memory_record() -> dict[str, int]:
@@ -302,6 +315,7 @@ def _load_module(name: str, path: Path):
 
 
 workflow = _load_module("phase11_remote_workflow", WORKFLOW_PATH)
+finalizer = _load_module("phase11_recovery_finalizer", FINALIZER_PATH)
 cuda_assertion = _load_module(
     "phase11_cuda_test_assertion", CUDA_ASSERTION_PATH
 )
@@ -316,6 +330,183 @@ l4_assertion = _load_module(
 )
 
 
+def _launch_receipt_record() -> dict:
+    contract = json.loads(CONFIG_PATH.read_text())
+    user_data = PROJECT_ROOT / contract["bootstrap"]["user_data_path"]
+    return {
+        "schema_version": 1,
+        "operation": "launch",
+        "created_at_utc": "2026-07-26T00:00:00+00:00",
+        "config_fingerprint": workflow._canonical_fingerprint(contract),
+        "source_commit": SOURCE_COMMIT,
+        "user_data_sha256": hashlib.sha256(user_data.read_bytes()).hexdigest(),
+        "resolved_ami": {
+            "image_id": EXPECTED_AMI_ID,
+            "name": (
+                "Deep Learning Base OSS Nvidia Driver GPU AMI "
+                "(Ubuntu 22.04) 20260726"
+            ),
+            "creation_date": "2026-07-26T00:00:00.000Z",
+            "architecture": "x86_64",
+            "root_device_name": "/dev/sda1",
+            "owner_id": "898082745236",
+        },
+        "instance_id": EXPECTED_INSTANCE_ID,
+        "instance_type": EXPECTED_INSTANCE_TYPE,
+        "region": EXPECTED_REGION,
+        "subnet_id": "subnet-0123456789abcdef0",
+        "security_group_id": "sg-0123456789abcdef0",
+        "public_ip_requested": True,
+        "root_volume_gib": 100,
+        "client_token": "colpali-p10-example",
+        "container": contract["container"],
+        "bootstrap": contract["bootstrap"],
+        "tags": {**contract["tags"], "Name": "colpali-triton-phase10"},
+        "launch_response": {
+            "OwnerId": EXPECTED_ACCOUNT_ID,
+            "ReservationId": "r-0123456789abcdef0",
+            "Groups": [],
+            "Instances": [
+                {
+                    "InstanceId": EXPECTED_INSTANCE_ID,
+                    "InstanceType": EXPECTED_INSTANCE_TYPE,
+                    "ImageId": EXPECTED_AMI_ID,
+                    "SubnetId": "subnet-0123456789abcdef0",
+                    "SecurityGroups": [
+                        {
+                            "GroupId": "sg-0123456789abcdef0",
+                            "GroupName": "colpali-benchmark",
+                        }
+                    ],
+                    "Placement": {"AvailabilityZone": "us-west-2a"},
+                    "Architecture": "x86_64",
+                }
+            ],
+        },
+    }
+
+
+def _write_launch_receipt(path: Path, record: dict | None = None) -> Path:
+    path.write_text(
+        json.dumps(record or _launch_receipt_record(), sort_keys=True) + "\n"
+    )
+    return path
+
+
+def _expected_host() -> dict[str, str]:
+    return {
+        "instance_id": EXPECTED_INSTANCE_ID,
+        "instance_type": EXPECTED_INSTANCE_TYPE,
+        "region": EXPECTED_REGION,
+        "ami_id": EXPECTED_AMI_ID,
+        "account_id": EXPECTED_ACCOUNT_ID,
+        "launch_receipt_sha256": LAUNCH_RECEIPT_SHA256,
+        "config_fingerprint": EXPECTED_CONFIG_FINGERPRINT,
+    }
+
+
+def _host_metadata_record() -> dict:
+    contract = json.loads(CONFIG_PATH.read_text())
+    image = [
+        {
+            "Id": "sha256:" + "c" * 64,
+            "Architecture": "amd64",
+            "Os": "linux",
+            "Config": {
+                "Env": [
+                    f"COLPALI_SOURCE_COMMIT={SOURCE_COMMIT}",
+                ],
+                "Labels": {
+                    "org.opencontainers.image.revision": SOURCE_COMMIT,
+                    "org.opencontainers.image.source": "local-worktree",
+                    "org.opencontainers.image.base.name": contract["container"][
+                        "base_tag"
+                    ],
+                    "org.opencontainers.image.base.digest": contract[
+                        "container"
+                    ]["base_manifest_digest"],
+                },
+            },
+        }
+    ]
+    bootstrap = {
+        "base_image": contract["container"]["base_reference"],
+        "container": {
+            "architecture": "x86_64",
+            "torch": "2.6.0+cu124",
+            "cuda_build": "12.4",
+            "triton": "3.2.0",
+            "cuda_available": True,
+            "gpu_name": "NVIDIA L4",
+            "gpu_memory_bytes": 23 * 1024**3,
+        },
+        "docker_version": "29.5.3",
+        "nvidia_container_toolkit": "NVIDIA Container Toolkit 1.19.1",
+        "nvidia_smi": "NVIDIA L4, GPU-example",
+    }
+    successful = lambda stdout: {
+        "command": ["example"],
+        "available": True,
+        "returncode": 0,
+        "stdout": stdout,
+        "stderr": "",
+    }
+    record = {
+        "format": "colpali-triton-phase11-host-metadata-v1",
+        "captured_at": "2026-07-26T00:00:00Z",
+        "source_commit": SOURCE_COMMIT,
+        "run_id": "phase11-test",
+        "container_image_name": "colpali-triton:phase11-test",
+        "host": {"architecture": "x86_64"},
+        "ec2": {
+            "available": True,
+            "identity_document": {
+                "accountId": EXPECTED_ACCOUNT_ID,
+                "architecture": "x86_64",
+                "availabilityZone": "us-west-2a",
+                "imageId": EXPECTED_AMI_ID,
+                "instanceId": EXPECTED_INSTANCE_ID,
+                "instanceType": EXPECTED_INSTANCE_TYPE,
+                "privateIp": "10.0.0.5",
+                "region": EXPECTED_REGION,
+                "version": "2017-09-30",
+            },
+        },
+        "nvidia_smi": successful(
+            "0, NVIDIA L4, GPU-12345678-abcd-1234-abcd-1234567890ab, "
+            "00000000:00:1E.0, 580.159.04, 23034 MiB, 8.9, P8, "
+            "300 MHz, 405 MHz, 72.00 W"
+        ),
+        "docker_version": successful(
+            json.dumps(
+                {
+                    "Client": {"Version": "29.5.3"},
+                    "Server": {"Version": "29.5.3"},
+                }
+            )
+        ),
+        "docker_image": successful(json.dumps(image)),
+        "bootstrap": {
+            "available": True,
+            "path": "/var/lib/colpali-triton/bootstrap-environment.json",
+            "sha256": "d" * 64,
+            "record": bootstrap,
+        },
+        "environment_contract": {"available": True},
+    }
+    record["validation"] = workflow.validate_host_evidence(
+        record,
+        contract,
+        expected_instance_id=EXPECTED_INSTANCE_ID,
+        expected_instance_type=EXPECTED_INSTANCE_TYPE,
+        expected_region=EXPECTED_REGION,
+        expected_ami_id=EXPECTED_AMI_ID,
+        expected_account_id=EXPECTED_ACCOUNT_ID,
+    )
+    assert record["validation"]["status"] == "passed"
+    return record
+
+
 def _spec(tmp_path: Path, **overrides):
     values = {
         "host": "203.0.113.10",
@@ -328,9 +519,43 @@ def _spec(tmp_path: Path, **overrides):
         "run_id": "phase11-test",
         "source_commit": SOURCE_COMMIT,
         "image_name": "colpali-triton:phase11-test",
+        "launch_receipt_path": tmp_path / "aws_launch_receipt.json",
+        "launch_receipt_sha256": LAUNCH_RECEIPT_SHA256,
+        "launch_config_fingerprint": EXPECTED_CONFIG_FINGERPRINT,
+        "expected_instance_id": EXPECTED_INSTANCE_ID,
+        "expected_instance_type": EXPECTED_INSTANCE_TYPE,
+        "expected_region": EXPECTED_REGION,
+        "expected_ami_id": EXPECTED_AMI_ID,
+        "expected_account_id": EXPECTED_ACCOUNT_ID,
     }
     values.update(overrides)
     return workflow.RemoteSpec(**values)
+
+
+def _finalizer_args(tmp_path: Path) -> SimpleNamespace:
+    source = tmp_path / "source"
+    result = tmp_path / "remote-result"
+    control = tmp_path / "remote-result.control"
+    source.mkdir()
+    result.mkdir()
+    control.mkdir()
+    (source / ".source_commit").write_text(SOURCE_COMMIT + "\n")
+    return SimpleNamespace(
+        source_directory=source,
+        result_directory=result,
+        control_directory=control,
+        source_commit=SOURCE_COMMIT,
+        run_id="phase11-test",
+        expected_instance_id=EXPECTED_INSTANCE_ID,
+        expected_instance_type=EXPECTED_INSTANCE_TYPE,
+        expected_region=EXPECTED_REGION,
+        expected_ami_id=EXPECTED_AMI_ID,
+        expected_account_id=EXPECTED_ACCOUNT_ID,
+        launch_receipt_sha256=LAUNCH_RECEIPT_SHA256,
+        launch_config_fingerprint=EXPECTED_CONFIG_FINGERPRINT,
+        job_exit_code=124,
+        recovery_source="detached-wrapper",
+    )
 
 
 def _write_manifest(
@@ -378,6 +603,9 @@ def _write_manifest(
             sort_keys=True,
         )
         + "\n"
+    )
+    (root / "host_metadata.json").write_text(
+        json.dumps(_host_metadata_record(), sort_keys=True) + "\n"
     )
     if with_profile:
         (root / "maxsim_profile.ncu-rep").write_bytes(b"real-profile")
@@ -436,6 +664,7 @@ def _write_manifest(
         "steps": steps,
         "source_commit": SOURCE_COMMIT,
         "run_id": "phase11-test",
+        "expected_host": _expected_host(),
         "files": records,
     }
     manifest_path = root / "artifact_manifest.json"
@@ -515,6 +744,8 @@ def test_offline_plan_states_every_remote_safety_boundary(
 
     assert plan["status"] == "ready"
     assert plan["source_commit"] == SOURCE_COMMIT
+    assert plan["expected_host"] == _expected_host()
+    assert plan["launch_receipt"]["valid"] is True
     assert plan["remote_source_directory"].endswith(SOURCE_COMMIT)
     assert plan["remote_result_directory"].endswith(
         f"{SOURCE_COMMIT}/phase11-test"
@@ -536,6 +767,75 @@ def test_offline_plan_states_every_remote_safety_boundary(
     assert any("ncu then nsys" in step for step in plan["steps"])
 
 
+def test_launch_receipt_binds_exact_lifecycle_and_response_fields(
+    tmp_path: Path,
+) -> None:
+    path = _write_launch_receipt(tmp_path / "launch.json")
+
+    receipt = workflow._load_launch_receipt(
+        path,
+        source_commit=SOURCE_COMMIT,
+    )
+
+    assert receipt.path == path.resolve()
+    assert receipt.instance_id == EXPECTED_INSTANCE_ID
+    assert receipt.instance_type == EXPECTED_INSTANCE_TYPE
+    assert receipt.region == EXPECTED_REGION
+    assert receipt.ami_id == EXPECTED_AMI_ID
+    assert receipt.account_id == EXPECTED_ACCOUNT_ID
+    assert receipt.config_fingerprint == EXPECTED_CONFIG_FINGERPRINT
+    assert receipt.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "schema",
+        "operation",
+        "config_fingerprint",
+        "source_commit",
+        "container",
+        "response_instance",
+        "response_account_invalid",
+    ),
+)
+def test_launch_receipt_rejects_contract_or_response_mismatch(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    receipt = _launch_receipt_record()
+    if mutation == "schema":
+        receipt["schema_version"] = 2
+    elif mutation == "operation":
+        receipt["operation"] = "status"
+    elif mutation == "config_fingerprint":
+        receipt["config_fingerprint"] = "0" * 64
+    elif mutation == "source_commit":
+        receipt["source_commit"] = "0" * 40
+    elif mutation == "container":
+        receipt["container"]["triton_version"] = "0.0.0"
+    elif mutation == "response_instance":
+        receipt["launch_response"]["Instances"][0]["InstanceId"] = (
+            "i-11111111111111111"
+        )
+    else:
+        receipt["launch_response"]["OwnerId"] = "not-an-account"
+    path = _write_launch_receipt(tmp_path / "launch.json", receipt)
+
+    with pytest.raises(workflow.WorkflowError, match="launch receipt"):
+        workflow._load_launch_receipt(path, source_commit=SOURCE_COMMIT)
+
+
+def test_launch_receipt_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    path = tmp_path / "launch.json"
+    path.write_text(
+        '{"schema_version": 1, "schema_version": 1, "operation": "launch"}'
+    )
+
+    with pytest.raises(workflow.WorkflowError, match="duplicate JSON key"):
+        workflow._load_launch_receipt(path, source_commit=SOURCE_COMMIT)
+
+
 def test_plan_main_invokes_only_local_git(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -544,6 +844,7 @@ def test_plan_main_invokes_only_local_git(
     identity = tmp_path / "benchmark.pem"
     identity.write_text("not-a-real-key")
     identity.chmod(0o600)
+    launch_receipt = _write_launch_receipt(tmp_path / "launch.json")
     commands: list[list[str]] = []
 
     def fake_run(command, *, capture_output=True):
@@ -571,6 +872,8 @@ def test_plan_main_invokes_only_local_git(
             "203.0.113.10",
             "--identity-file",
             str(identity),
+            "--launch-receipt",
+            str(launch_receipt),
             "--run-id",
             "phase11-test",
             "--local-result-base",
@@ -583,6 +886,44 @@ def test_plan_main_invokes_only_local_git(
     output = json.loads(capsys.readouterr().out)
     assert output["status"] == "ready"
     assert output["safety"]["plan_invokes_ssh"] is False
+
+
+def test_missing_launch_receipt_blocks_plan_without_external_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    identity = tmp_path / "benchmark.pem"
+    identity.write_text("key")
+    identity.chmod(0o600)
+    monkeypatch.setattr(
+        workflow,
+        "_source_state",
+        lambda: (SOURCE_COMMIT, []),
+    )
+    monkeypatch.setattr(workflow, "_local_preflight", lambda spec: [])
+
+    status = workflow.main(
+        (
+            "--host",
+            "203.0.113.10",
+            "--identity-file",
+            str(identity),
+            "--launch-receipt",
+            str(tmp_path / "missing.json"),
+            "--run-id",
+            "phase11-test",
+            "--local-result-base",
+            str(tmp_path / "local"),
+        )
+    )
+
+    plan = json.loads(capsys.readouterr().out)
+    assert status == 0
+    assert plan["status"] == "blocked"
+    assert plan["expected_host"] is None
+    assert plan["launch_receipt"]["valid"] is False
+    assert any("launch receipt" in blocker for blocker in plan["blockers"])
 
 
 def test_execution_requires_exact_acknowledgement_before_ssh(
@@ -626,6 +967,48 @@ def test_execution_requires_exact_acknowledgement_before_ssh(
     assert workflow.RUN_ACKNOWLEDGEMENT in capsys.readouterr().err
 
 
+def test_execution_requires_a_valid_launch_receipt_before_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    identity = tmp_path / "benchmark.pem"
+    identity.write_text("key")
+    identity.chmod(0o600)
+    monkeypatch.setattr(
+        workflow,
+        "_source_state",
+        lambda: (SOURCE_COMMIT, []),
+    )
+    monkeypatch.setattr(workflow, "_local_preflight", lambda spec: [])
+    monkeypatch.setattr(
+        workflow,
+        "execute",
+        lambda spec: pytest.fail("execute must not be called"),
+    )
+
+    status = workflow.main(
+        (
+            "--host",
+            "203.0.113.10",
+            "--identity-file",
+            str(identity),
+            "--launch-receipt",
+            str(tmp_path / "missing.json"),
+            "--run-id",
+            "phase11-test",
+            "--local-result-base",
+            str(tmp_path / "local"),
+            "--execute",
+            "--acknowledge-run",
+            workflow.RUN_ACKNOWLEDGEMENT,
+        )
+    )
+
+    assert status == 2
+    assert "launch receipt" in capsys.readouterr().err
+
+
 def test_existing_local_result_is_a_preflight_blocker(
     tmp_path: Path,
 ) -> None:
@@ -660,9 +1043,11 @@ def test_source_archive_uses_exact_commit_and_hashes_content(
 ) -> None:
     spec = _spec(tmp_path)
     commands = []
+    timeouts = []
 
     def fake_run(command, **kwargs):
         commands.append(tuple(command))
+        timeouts.append(kwargs["timeout"])
         output = kwargs["stdout"]
         payload = b"committed source\n"
         with tarfile.open(fileobj=output, mode="w") as archive:
@@ -684,6 +1069,7 @@ def test_source_archive_uses_exact_commit_and_hashes_content(
     assert commands == [
         ("git", "archive", "--format=tar", spec.source_commit)
     ]
+    assert timeouts == [workflow.SOURCE_ARCHIVE_TIMEOUT_SECONDS]
     assert "HEAD" not in commands[0]
     assert archive.archive_sha256 == hashlib.sha256(
         archive.path.read_bytes()
@@ -740,6 +1126,31 @@ def test_remote_source_tamper_is_rejected_instead_of_reused(
     assert workflow._remote_source_state(spec, archive) == "invalid"
 
 
+def test_source_upload_has_a_separate_transfer_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "source.tar"
+    archive_path.write_bytes(b"archive")
+    archive = workflow.SourceArchive(
+        path=archive_path,
+        archive_sha256="b" * 64,
+        content_sha256="c" * 64,
+    )
+    observed = []
+
+    def time_out(command, **kwargs):
+        observed.append((command, kwargs["timeout"]))
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(workflow.subprocess, "run", time_out)
+
+    with pytest.raises(workflow.WorkflowError, match="transfer bound"):
+        workflow._upload_archive(_spec(tmp_path), archive)
+
+    assert observed[0][1] == workflow.SOURCE_UPLOAD_TIMEOUT_SECONDS
+
+
 def test_detached_job_is_systemd_managed_and_overall_bounded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -768,7 +1179,274 @@ def test_detached_job_is_systemd_managed_and_overall_bounded(
         f"/usr/bin/timeout --signal=TERM --kill-after=60s "
         f"{workflow.REMOTE_JOB_TIMEOUT_SECONDS}s"
     ) in command
+    assert "phase11_finalize_artifacts.py" in command
+    assert (
+        f"/usr/bin/timeout --signal=TERM --kill-after=30s "
+        f"{workflow.REMOTE_FINALIZER_TIMEOUT_SECONDS}s"
+    ) in command
+    assert "--recovery-source detached-wrapper" in command
+    assert "finalizer.exit_code" in command
+    for flag, value in (
+        ("--expected-instance-id", EXPECTED_INSTANCE_ID),
+        ("--expected-instance-type", EXPECTED_INSTANCE_TYPE),
+        ("--expected-region", EXPECTED_REGION),
+        ("--expected-ami-id", EXPECTED_AMI_ID),
+        ("--expected-account-id", EXPECTED_ACCOUNT_ID),
+        ("--launch-receipt-sha256", LAUNCH_RECEIPT_SHA256),
+        ("--launch-config-fingerprint", EXPECTED_CONFIG_FINGERPRINT),
+    ):
+        assert flag in command
+        assert value in command
     assert "terminate" not in command
+
+
+def test_remote_state_treats_systemd_transitions_as_live_and_checks_seal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    commands = []
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="c" * 64,
+        content_sha256="d" * 64,
+    )
+
+    def fake_ssh(spec_value, command, *, capture_output=True):
+        del spec_value, capture_output
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "running", "")
+
+    monkeypatch.setattr(workflow, "_run_ssh", fake_ssh)
+
+    assert workflow._remote_run_state(_spec(tmp_path), archive) == "running"
+    command = commands[0]
+    for live_state in ("active", "activating", "reloading", "deactivating"):
+        assert f'test "${{unit_state}}" = {live_state}' in command
+    assert "sha256sum --check SEALED.sha256" in command
+    assert "needs_finalization" in command
+
+
+def test_poll_fallback_finalizes_then_requeries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="c" * 64,
+        content_sha256="d" * 64,
+    )
+    states = iter(("needs_finalization", "sealed"))
+    finalized = []
+    monkeypatch.setattr(
+        workflow,
+        "_remote_run_state",
+        lambda *args: next(states),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_finalize_remote_run",
+        lambda *args: finalized.append(args),
+    )
+
+    assert workflow._wait_for_remote_run(_spec(tmp_path), archive) == "sealed"
+    assert len(finalized) == 1
+
+
+def test_poll_fallback_finalizer_is_separately_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = []
+
+    def fake_ssh(
+        spec_value,
+        command,
+        *,
+        capture_output=True,
+        timeout_seconds=workflow.SSH_COMMAND_TIMEOUT_SECONDS,
+    ):
+        del spec_value, capture_output
+        calls.append((command, timeout_seconds))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(workflow, "_run_ssh", fake_ssh)
+
+    workflow._finalize_remote_run(_spec(tmp_path))
+
+    command, timeout_seconds = calls[0]
+    assert "phase11_finalize_artifacts.py" in command
+    assert "--recovery-source poll-fallback" in command
+    assert (
+        f"timeout --signal=TERM --kill-after=30s "
+        f"{workflow.REMOTE_FINALIZER_TIMEOUT_SECONDS}s"
+    ) in command
+    assert timeout_seconds == workflow.REMOTE_FINALIZER_TIMEOUT_SECONDS + 60
+
+
+def test_recovery_finalizer_seals_verifiable_incomplete_bundle_idempotently(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    args = _finalizer_args(tmp_path)
+    partial = args.result_directory / "step_status.json"
+    partial.write_text('{"partial": true}\n')
+    (args.result_directory / "partial.log").write_text("timed out\n")
+    cleanup_calls = []
+
+    def fake_cleanup(root, *, run_id, source_commit):
+        cleanup_calls.append((root, run_id, source_commit))
+        return {
+            "format": "colpali-triton-phase11-emergency-cleanup-v1",
+            "recorded_at": "2026-07-26T00:00:00Z",
+            "scope": {},
+            "removed_container_ids": [],
+            "skipped_unmatched_container_ids": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr(finalizer, "_cleanup_containers", fake_cleanup)
+
+    result = finalizer.finalize(args)
+    manifest_before = (
+        args.result_directory / "artifact_manifest.json"
+    ).read_bytes()
+    repeated = finalizer.finalize(args)
+
+    assert result["status"] == "sealed_incomplete"
+    assert repeated == {"status": "already_sealed"}
+    assert (
+        args.result_directory / "artifact_manifest.json"
+    ).read_bytes() == manifest_before
+    assert len(cleanup_calls) == 1
+    assert list(
+        (args.result_directory / ".finalizer-quarantine").rglob(
+            "step_status.json"
+        )
+    )
+    _, _, status, reasons = workflow._verify_artifact_manifest(
+        args.result_directory,
+        source_commit=SOURCE_COMMIT,
+        run_id="phase11-test",
+        expected_host=_expected_host(),
+    )
+    assert status == "incomplete"
+    assert any("exit_code=124" in reason for reason in reasons)
+    assert set(
+        json.loads(
+            (args.result_directory / "step_status.json").read_text()
+        )["steps"]
+    ) == set(workflow.MANDATORY_PHASE11_STEPS)
+
+
+def test_recovery_finalizer_does_not_preserve_wrong_identity_seal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    args = _finalizer_args(tmp_path)
+    wrong_manifest = {
+        "format": "colpali-triton-phase11-artifact-manifest-v2",
+        "status": "incomplete",
+        "source_commit": SOURCE_COMMIT,
+        "run_id": "phase11-test",
+        "expected_host": {**_expected_host(), "instance_id": "i-deadbeef"},
+    }
+    manifest_path = args.result_directory / "artifact_manifest.json"
+    manifest_path.write_text(json.dumps(wrong_manifest, sort_keys=True) + "\n")
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    (args.result_directory / "SEALED.sha256").write_text(
+        f"{digest}  artifact_manifest.json\n"
+    )
+    monkeypatch.setattr(
+        finalizer,
+        "_cleanup_containers",
+        lambda *args, **kwargs: {
+            "format": "colpali-triton-phase11-emergency-cleanup-v1",
+            "recorded_at": "2026-07-26T00:00:00Z",
+            "scope": {},
+            "removed_container_ids": [],
+            "skipped_unmatched_container_ids": [],
+            "errors": [],
+        },
+    )
+
+    assert finalizer.finalize(args)["status"] == "sealed_incomplete"
+    recovered = json.loads(manifest_path.read_text())
+    assert recovered["expected_host"] == _expected_host()
+    assert list(
+        (args.result_directory / ".finalizer-quarantine").rglob(
+            "artifact_manifest.json"
+        )
+    )
+
+
+def test_emergency_cleanup_removes_only_exactly_labeled_containers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "result"
+    cid_directory = root / ".docker-cids"
+    cid_directory.mkdir(parents=True)
+    matching = "a" * 64
+    mismatched = "b" * 64
+    (cid_directory / "matching.cid").write_text(matching)
+    (cid_directory / "mismatched.cid").write_text(mismatched)
+    calls = []
+
+    def fake_docker(arguments):
+        arguments = tuple(arguments)
+        calls.append(arguments)
+        if arguments[:2] == ("ps", "-aq"):
+            return subprocess.CompletedProcess(arguments, 0, matching + "\n", "")
+        if arguments[0] == "inspect":
+            labels = (
+                "phase11-test\t" + SOURCE_COMMIT
+                if arguments[-1] == matching
+                else "another-run\t" + SOURCE_COMMIT
+            )
+            return subprocess.CompletedProcess(arguments, 0, labels + "\n", "")
+        if arguments[:2] == ("rm", "--force"):
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        raise AssertionError(arguments)
+
+    monkeypatch.setattr(finalizer, "_docker", fake_docker)
+
+    cleanup = finalizer._cleanup_containers(
+        root,
+        run_id="phase11-test",
+        source_commit=SOURCE_COMMIT,
+    )
+
+    assert cleanup["removed_container_ids"] == [matching]
+    assert cleanup["skipped_unmatched_container_ids"] == [mismatched]
+    query = calls[0]
+    assert "label=colpali.phase11.run_id=phase11-test" in query
+    assert f"label=colpali.phase11.source_commit={SOURCE_COMMIT}" in query
+    assert ("rm", "--force", mismatched) not in calls
+
+
+def test_remote_control_contract_binds_launch_receipt_and_host(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="c" * 64,
+        content_sha256="d" * 64,
+    )
+
+    checks = workflow._control_contract_checks(spec, archive)
+
+    for marker, value in (
+        (".expected_instance_id", EXPECTED_INSTANCE_ID),
+        (".expected_instance_type", EXPECTED_INSTANCE_TYPE),
+        (".expected_region", EXPECTED_REGION),
+        (".expected_ami_id", EXPECTED_AMI_ID),
+        (".expected_account_id", EXPECTED_ACCOUNT_ID),
+        (".launch_receipt_sha256", LAUNCH_RECEIPT_SHA256),
+        (".launch_config_fingerprint", EXPECTED_CONFIG_FINGERPRINT),
+    ):
+        assert marker in checks
+        assert value in checks
 
 
 def test_remote_wait_reconnects_after_transient_ssh_failure(
@@ -782,7 +1460,7 @@ def test_remote_wait_reconnects_after_transient_ssh_failure(
         content_sha256="c" * 64,
     )
     states: list[object] = [
-        workflow.WorkflowError("connection reset"),
+        workflow.SSHTransportError("connection reset"),
         "running",
         "sealed",
     ]
@@ -799,6 +1477,125 @@ def test_remote_wait_reconnects_after_transient_ssh_failure(
 
     assert workflow._wait_for_remote_run(spec, archive) == "sealed"
     assert states == []
+
+
+@pytest.mark.parametrize(
+    ("returncode", "error_type"),
+    (
+        (255, workflow.SSHTransportError),
+        (4, workflow.WorkflowError),
+    ),
+)
+def test_ssh_distinguishes_transport_from_remote_command_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    returncode: int,
+    error_type: type[Exception],
+) -> None:
+    monkeypatch.setattr(
+        workflow,
+        "_run_local",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args,
+            returncode,
+            "",
+            "ssh failure",
+        ),
+    )
+
+    with pytest.raises(error_type) as captured:
+        workflow._run_ssh(_spec(tmp_path), "false")
+
+    if returncode != 255:
+        assert not isinstance(captured.value, workflow.SSHTransportError)
+
+
+def test_ssh_subprocess_timeout_is_bounded_but_not_retried_as_rc255(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed = []
+
+    def time_out(command, **kwargs):
+        observed.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(workflow.subprocess, "run", time_out)
+
+    with pytest.raises(workflow.WorkflowError, match="120-second bound") as exc:
+        workflow._run_ssh(_spec(tmp_path), "printf ready")
+
+    assert not isinstance(exc.value, workflow.SSHTransportError)
+    assert observed == [workflow.SSH_COMMAND_TIMEOUT_SECONDS]
+
+
+def test_remote_command_start_failure_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="c" * 64,
+        content_sha256="d" * 64,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_remote_run_state",
+        lambda *args: "prepared",
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_ensure_remote_control",
+        lambda *args: None,
+    )
+    attempts = []
+
+    def fail_start(*args):
+        attempts.append(args)
+        raise workflow.WorkflowError("sudo policy rejected systemd-run")
+
+    monkeypatch.setattr(workflow, "_start_remote_job", fail_start)
+
+    with pytest.raises(workflow.WorkflowError, match="sudo policy rejected"):
+        workflow._wait_for_remote_run(_spec(tmp_path), archive)
+
+    assert len(attempts) == 1
+
+
+def test_repeated_ambiguous_start_failures_share_one_reconnect_window(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="c" * 64,
+        content_sha256="d" * 64,
+    )
+    monotonic_values = iter((0.0, 1.0, 2.0, 7.0))
+    monkeypatch.setattr(
+        workflow,
+        "_remote_run_state",
+        lambda *args: "prepared",
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_ensure_remote_control",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_start_remote_job",
+        lambda *args: (_ for _ in ()).throw(
+            workflow.SSHTransportError("connection reset")
+        ),
+    )
+    monkeypatch.setattr(workflow.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(workflow.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(workflow, "REMOTE_RECONNECT_TIMEOUT_SECONDS", 5)
+    monkeypatch.setattr(workflow, "REMOTE_POLL_TIMEOUT_SECONDS", 100)
+
+    with pytest.raises(workflow.WorkflowError, match="remained unavailable"):
+        workflow._wait_for_remote_run(_spec(tmp_path), archive)
 
 
 @pytest.mark.parametrize("resume_state", ("sealed", "bundled"))
@@ -908,9 +1705,16 @@ def test_retrieval_receipt_retains_source_archive_and_content_hashes(
     )
     bundle_remote = "/remote/phase11-test.tar.gz"
     bundle_sha_remote = f"{bundle_remote}.sha256"
+    transfer_timeouts = []
 
-    def fake_run(command, *, capture_output=True):
+    def fake_run(
+        command,
+        *,
+        capture_output=True,
+        timeout_seconds=workflow.LOCAL_COMMAND_TIMEOUT_SECONDS,
+    ):
         del capture_output
+        transfer_timeouts.append(timeout_seconds)
         destination = Path(command[-1])
         if destination.name.endswith(".sha256"):
             bundle = destination.with_suffix("")
@@ -950,6 +1754,10 @@ def test_retrieval_receipt_retains_source_archive_and_content_hashes(
         receipt["remote_job_timeout_seconds"]
         == workflow.REMOTE_JOB_TIMEOUT_SECONDS
     )
+    assert transfer_timeouts == [
+        workflow.ARTIFACT_DOWNLOAD_TIMEOUT_SECONDS,
+        workflow.LOCAL_COMMAND_TIMEOUT_SECONDS,
+    ]
 
 
 def test_manifest_verification_detects_payload_tampering(
@@ -964,6 +1772,7 @@ def test_manifest_verification_detects_payload_tampering(
             root,
             source_commit=SOURCE_COMMIT,
             run_id="phase11-test",
+            expected_host=_expected_host(),
         )
     )
 
@@ -988,6 +1797,54 @@ def test_manifest_verification_detects_payload_tampering(
             root,
             source_commit=SOURCE_COMMIT,
             run_id="phase11-test",
+            expected_host=_expected_host(),
+        )
+
+
+def test_manifest_expected_host_must_equal_launch_receipt(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase11-test"
+    root.mkdir()
+    manifest_path, _ = _write_manifest(root)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["expected_host"]["account_id"] = "999999999999"
+    _reseal_manifest(root, manifest)
+
+    with pytest.raises(
+        workflow.WorkflowError,
+        match="expected host differs from the launch receipt",
+    ):
+        workflow._verify_artifact_manifest(
+            root,
+            source_commit=SOURCE_COMMIT,
+            run_id="phase11-test",
+            expected_host=_expected_host(),
+        )
+
+
+def test_complete_manifest_locally_recomputes_host_identity_gate(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase11-test"
+    root.mkdir()
+    manifest_path, _ = _write_manifest(root)
+    manifest = json.loads(manifest_path.read_text())
+    host_path = root / "host_metadata.json"
+    host = json.loads(host_path.read_text())
+    host["ec2"]["identity_document"]["instanceId"] = "i-deadbeef"
+    host_path.write_text(json.dumps(host, sort_keys=True) + "\n")
+    _reseal_manifest(root, manifest)
+
+    with pytest.raises(
+        workflow.WorkflowError,
+        match="stored host validation differs from local recomputation",
+    ):
+        workflow._verify_artifact_manifest(
+            root,
+            source_commit=SOURCE_COMMIT,
+            run_id="phase11-test",
+            expected_host=_expected_host(),
         )
 
 
@@ -1079,6 +1936,7 @@ def test_manifest_requires_exact_steps_and_step_status_agreement(
             root,
             source_commit=SOURCE_COMMIT,
             run_id="phase11-test",
+            expected_host=_expected_host(),
         )
 
 
@@ -1104,6 +1962,7 @@ def test_manifest_rejects_unrelated_cuda_count_keys(
             root,
             source_commit=SOURCE_COMMIT,
             run_id="phase11-test",
+            expected_host=_expected_host(),
         )
 
 
@@ -1118,6 +1977,7 @@ def test_manifest_preserves_explicit_incomplete_profile_state(
         root,
         source_commit=SOURCE_COMMIT,
         run_id="phase11-test",
+        expected_host=_expected_host(),
     )
 
     assert status == "incomplete"
@@ -1139,6 +1999,7 @@ def test_manifest_cannot_claim_completion_without_real_profile(
             root,
             source_commit=SOURCE_COMMIT,
             run_id="phase11-test",
+            expected_host=_expected_host(),
         )
 
 
@@ -1305,6 +2166,7 @@ def test_incomplete_remote_result_returns_nonzero_after_execute(
     identity = tmp_path / "benchmark.pem"
     identity.write_text("key")
     identity.chmod(0o600)
+    launch_receipt = _write_launch_receipt(tmp_path / "launch.json")
     called = []
 
     monkeypatch.setattr(
@@ -1328,6 +2190,8 @@ def test_incomplete_remote_result_returns_nonzero_after_execute(
             "203.0.113.10",
             "--identity-file",
             str(identity),
+            "--launch-receipt",
+            str(launch_receipt),
             "--run-id",
             "phase11-test",
             "--local-result-base",
@@ -1663,6 +2527,7 @@ def test_incomplete_contract_replays_identically_under_new_root(
         "steps": steps,
         "source_commit": SOURCE_COMMIT,
         "run_id": "phase11-incomplete",
+        "expected_host": _expected_host(),
         "files": files,
     }
     manifest_path = remote_root / "artifact_manifest.json"
@@ -1684,6 +2549,7 @@ def test_incomplete_contract_replays_identically_under_new_root(
         local_root,
         source_commit=SOURCE_COMMIT,
         run_id="phase11-incomplete",
+        expected_host=_expected_host(),
     )
     assert status == "incomplete"
     assert reasons == ["mandatory step failed: tuning"]

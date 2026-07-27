@@ -188,3 +188,27 @@ def test_timed_out_containers_are_force_removed_by_cid() -> None:
         script,
     )
     assert 'rmdir "${CID_DIRECTORY}"' in script
+
+
+def test_profiler_overwrite_flags_match_each_profiler_cli() -> None:
+    script = JOB_PATH.read_text()
+    ncu_start = script.index("        ncu \\\n")
+    ncu_end = script.index("    NCU_EXIT=$?", ncu_start)
+    nsys_start = script.index("        nsys profile \\\n")
+    nsys_end = script.index("    NSYS_EXIT=$?", nsys_start)
+
+    assert "--force-overwrite" not in script[ncu_start:ncu_end]
+    assert "--force-overwrite=false" in script[nsys_start:nsys_end]
+
+
+def test_every_phase11_container_has_exact_recovery_labels() -> None:
+    script = JOB_PATH.read_text()
+
+    assert '"colpali.phase11.run_id=${RUN_ID}"' in script
+    assert (
+        '"colpali.phase11.source_commit=${SOURCE_COMMIT}"'
+        in script
+    )
+    assert script.index('"colpali.phase11.run_id=${RUN_ID}"') < script.index(
+        "PROFILER_DOCKER_OPTIONS=("
+    )

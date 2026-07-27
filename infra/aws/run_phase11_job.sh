@@ -6,6 +6,13 @@ RESULT_DIRECTORY=""
 SOURCE_COMMIT=""
 RUN_ID=""
 IMAGE_NAME=""
+EXPECTED_INSTANCE_ID=""
+EXPECTED_INSTANCE_TYPE=""
+EXPECTED_REGION=""
+EXPECTED_AMI_ID=""
+EXPECTED_ACCOUNT_ID=""
+LAUNCH_RECEIPT_SHA256=""
+LAUNCH_CONFIG_FINGERPRINT=""
 
 BUILD_TIMEOUT_SECONDS=1200
 HARDWARE_TIMEOUT_SECONDS=120
@@ -29,7 +36,14 @@ Usage:
     --result-directory ABSOLUTE_PATH \
     --source-commit 40_HEX_COMMIT \
     --run-id SAFE_RUN_ID \
-    --image-name NAME:TAG
+    --image-name NAME:TAG \
+    --expected-instance-id INSTANCE_ID \
+    --expected-instance-type INSTANCE_TYPE \
+    --expected-region REGION \
+    --expected-ami-id AMI_ID \
+    --expected-account-id 12_DIGIT_ACCOUNT_ID \
+    --launch-receipt-sha256 64_HEX_SHA256 \
+    --launch-config-fingerprint 64_HEX_SHA256
 
 Runs the Phase 11 CUDA validation, tuning, canonical benchmark, and bounded
 profiling attempts. The result directory must not already exist. Once created,
@@ -57,6 +71,34 @@ while (( $# > 0 )); do
             ;;
         --image-name)
             IMAGE_NAME="${2:-}"
+            shift 2
+            ;;
+        --expected-instance-id)
+            EXPECTED_INSTANCE_ID="${2:-}"
+            shift 2
+            ;;
+        --expected-instance-type)
+            EXPECTED_INSTANCE_TYPE="${2:-}"
+            shift 2
+            ;;
+        --expected-region)
+            EXPECTED_REGION="${2:-}"
+            shift 2
+            ;;
+        --expected-ami-id)
+            EXPECTED_AMI_ID="${2:-}"
+            shift 2
+            ;;
+        --expected-account-id)
+            EXPECTED_ACCOUNT_ID="${2:-}"
+            shift 2
+            ;;
+        --launch-receipt-sha256)
+            LAUNCH_RECEIPT_SHA256="${2:-}"
+            shift 2
+            ;;
+        --launch-config-fingerprint)
+            LAUNCH_CONFIG_FINGERPRINT="${2:-}"
             shift 2
             ;;
         --help|-h)
@@ -90,6 +132,34 @@ if [[ ! "${RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]; then
 fi
 if [[ ! "${IMAGE_NAME}" =~ ^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+$ ]]; then
     echo "--image-name must be an explicit safe name:tag" >&2
+    exit 2
+fi
+if [[ ! "${EXPECTED_INSTANCE_ID}" =~ ^i-[0-9a-f]{8,17}$ ]]; then
+    echo "--expected-instance-id must be a valid EC2 instance ID" >&2
+    exit 2
+fi
+if [[ ! "${EXPECTED_INSTANCE_TYPE}" =~ ^g6\.(xlarge|2xlarge)$ ]]; then
+    echo "--expected-instance-type must be g6.xlarge or g6.2xlarge" >&2
+    exit 2
+fi
+if [[ ! "${EXPECTED_REGION}" =~ ^[a-z][a-z0-9]*(-[a-z0-9]+)+-[0-9]+$ ]]; then
+    echo "--expected-region must be a valid AWS region" >&2
+    exit 2
+fi
+if [[ ! "${EXPECTED_AMI_ID}" =~ ^ami-[0-9a-f]{8,17}$ ]]; then
+    echo "--expected-ami-id must be a valid AMI ID" >&2
+    exit 2
+fi
+if [[ ! "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]]; then
+    echo "--expected-account-id must be a 12-digit AWS account ID" >&2
+    exit 2
+fi
+if [[ ! "${LAUNCH_RECEIPT_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "--launch-receipt-sha256 must be 64 lowercase hexadecimal digits" >&2
+    exit 2
+fi
+if [[ ! "${LAUNCH_CONFIG_FINGERPRINT}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "--launch-config-fingerprint must be 64 lowercase hexadecimal digits" >&2
     exit 2
 fi
 if [[ ! -f "${SOURCE_DIRECTORY}/.source_commit" ]] \
@@ -168,6 +238,10 @@ DOCKER_OPTIONS=(
     linux/amd64
     --gpus
     all
+    --label
+    "colpali.phase11.run_id=${RUN_ID}"
+    --label
+    "colpali.phase11.source_commit=${SOURCE_COMMIT}"
     --shm-size
     1g
     --volume
@@ -244,6 +318,9 @@ CUDA_TEST_FILES=(
 
 export \
     SOURCE_COMMIT RUN_ID IMAGE_NAME \
+    EXPECTED_INSTANCE_ID EXPECTED_INSTANCE_TYPE EXPECTED_REGION \
+    EXPECTED_AMI_ID EXPECTED_ACCOUNT_ID \
+    LAUNCH_RECEIPT_SHA256 LAUNCH_CONFIG_FINGERPRINT \
     BUILD_TIMEOUT_SECONDS HARDWARE_TIMEOUT_SECONDS \
     HOST_METADATA_TIMEOUT_SECONDS CUDA_TESTS_TIMEOUT_SECONDS \
     CUDA_ASSERTION_TIMEOUT_SECONDS TUNING_PREFLIGHT_TIMEOUT_SECONDS \
@@ -279,6 +356,15 @@ record = {
     "source_commit": os.environ["SOURCE_COMMIT"],
     "run_id": os.environ["RUN_ID"],
     "container_image": os.environ["IMAGE_NAME"],
+    "expected_host": {
+        "instance_id": os.environ["EXPECTED_INSTANCE_ID"],
+        "instance_type": os.environ["EXPECTED_INSTANCE_TYPE"],
+        "region": os.environ["EXPECTED_REGION"],
+        "ami_id": os.environ["EXPECTED_AMI_ID"],
+        "account_id": os.environ["EXPECTED_ACCOUNT_ID"],
+        "launch_receipt_sha256": os.environ["LAUNCH_RECEIPT_SHA256"],
+        "config_fingerprint": os.environ["LAUNCH_CONFIG_FINGERPRINT"],
+    },
     "timeouts_seconds": timeouts,
     "remote_test_scope": "cuda-relevant-minimal-dependency",
     "local_full_suite_is_separate": True,
@@ -384,7 +470,12 @@ run_capture_timed \
     --output "${RESULT_DIRECTORY}/host_metadata.json" \
     --source-commit "${SOURCE_COMMIT}" \
     --run-id "${RUN_ID}" \
-    --image-name "${IMAGE_NAME}"
+    --image-name "${IMAGE_NAME}" \
+    --expected-instance-id "${EXPECTED_INSTANCE_ID}" \
+    --expected-instance-type "${EXPECTED_INSTANCE_TYPE}" \
+    --expected-region "${EXPECTED_REGION}" \
+    --expected-ami-id "${EXPECTED_AMI_ID}" \
+    --expected-account-id "${EXPECTED_ACCOUNT_ID}"
 HOST_METADATA_EXIT=$?
 
 if (( COMMAND_CONTRACT_EXIT == 0 \
@@ -562,7 +653,6 @@ if (( RESULT_CONTRACT_EXIT == 0 )); then
         --target-processes application-only \
         --set basic \
         --launch-count 1 \
-        --force-overwrite false \
         --export /phase11-results/maxsim_profile \
         python infra/aws/profile_phase11_maxsim.py \
         --winner-record /phase11-results/tuning_winner.json \
@@ -781,6 +871,7 @@ python3 - "${RESULT_DIRECTORY}" "${SOURCE_COMMIT}" "${RUN_ID}" <<'PY'
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -845,6 +936,15 @@ manifest = {
     "failure_reasons": failure_reasons,
     "source_commit": source_commit,
     "run_id": run_id,
+    "expected_host": {
+        "instance_id": os.environ["EXPECTED_INSTANCE_ID"],
+        "instance_type": os.environ["EXPECTED_INSTANCE_TYPE"],
+        "region": os.environ["EXPECTED_REGION"],
+        "ami_id": os.environ["EXPECTED_AMI_ID"],
+        "account_id": os.environ["EXPECTED_ACCOUNT_ID"],
+        "launch_receipt_sha256": os.environ["LAUNCH_RECEIPT_SHA256"],
+        "config_fingerprint": os.environ["LAUNCH_CONFIG_FINGERPRINT"],
+    },
     "steps": step_status["steps"],
     "profiling": profiling,
     "files": files,

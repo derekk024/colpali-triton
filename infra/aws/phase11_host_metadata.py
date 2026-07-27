@@ -458,10 +458,26 @@ def _validate_docker(
 def validate_host_evidence(
     record: Mapping[str, Any],
     contract: Mapping[str, Any],
+    *,
+    expected_instance_id: str,
+    expected_instance_type: str,
+    expected_region: str,
+    expected_ami_id: str,
+    expected_account_id: str,
 ) -> dict[str, Any]:
     """Validate all evidence needed to identify the exact paid GPU host."""
 
     errors: list[str] = []
+    if not INSTANCE_PATTERN.fullmatch(expected_instance_id):
+        errors.append("expected EC2 instance ID is invalid")
+    if expected_instance_type not in REQUIRED_INSTANCE_TYPES:
+        errors.append("expected EC2 instance type is outside scope")
+    if not REGION_PATTERN.fullmatch(expected_region):
+        errors.append("expected EC2 region is invalid")
+    if not AMI_PATTERN.fullmatch(expected_ami_id):
+        errors.append("expected EC2 AMI ID is invalid")
+    if not ACCOUNT_PATTERN.fullmatch(expected_account_id):
+        errors.append("expected EC2 account ID is invalid")
     source_commit = record.get("source_commit")
     if (
         not isinstance(source_commit, str)
@@ -504,23 +520,35 @@ def validate_host_evidence(
             errors.append("EC2 identity architecture is not x86_64")
         if not isinstance(instance_type, str) or instance_type not in allowed:
             errors.append("EC2 instance type is outside the scoped G6 types")
+        elif instance_type != expected_instance_type:
+            errors.append(
+                "EC2 instance type does not match the launch receipt"
+            )
         if (
             not isinstance(instance_id, str)
             or not INSTANCE_PATTERN.fullmatch(instance_id)
         ):
             errors.append("EC2 instance ID is invalid")
+        elif instance_id != expected_instance_id:
+            errors.append("EC2 instance ID does not match the launch receipt")
         if (
             not isinstance(image_id, str)
             or not AMI_PATTERN.fullmatch(image_id)
         ):
             errors.append("EC2 AMI ID is invalid")
+        elif image_id != expected_ami_id:
+            errors.append("EC2 AMI ID does not match the launch receipt")
         if not isinstance(region, str) or not REGION_PATTERN.fullmatch(region):
             errors.append("EC2 region is invalid")
+        elif region != expected_region:
+            errors.append("EC2 region does not match the launch receipt")
         if (
             not isinstance(account_id, str)
             or not ACCOUNT_PATTERN.fullmatch(account_id)
         ):
             errors.append("EC2 account ID is invalid")
+        elif account_id != expected_account_id:
+            errors.append("EC2 account ID does not match the launch receipt")
         if (
             not isinstance(availability_zone, str)
             or not isinstance(region, str)
@@ -552,6 +580,11 @@ def validate_host_evidence(
         "expected": {
             "host_architecture": ami_contract["architecture"],
             "instance_types": sorted(allowed),
+            "instance_id": expected_instance_id,
+            "instance_type": expected_instance_type,
+            "region": expected_region,
+            "ami_id": expected_ami_id,
+            "account_id": expected_account_id,
             "gpu": "NVIDIA L4",
             "compute_capability": "8.9",
             "container_platform": contract["platform"],
@@ -570,6 +603,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--image-name", required=True)
+    parser.add_argument("--expected-instance-id", required=True)
+    parser.add_argument("--expected-instance-type", required=True)
+    parser.add_argument("--expected-region", required=True)
+    parser.add_argument("--expected-ami-id", required=True)
+    parser.add_argument("--expected-account-id", required=True)
     parser.add_argument(
         "--bootstrap-environment",
         type=Path,
@@ -627,7 +665,15 @@ def main() -> int:
             "expected": {},
         }
     else:
-        record["validation"] = validate_host_evidence(record, contract)
+        record["validation"] = validate_host_evidence(
+            record,
+            contract,
+            expected_instance_id=args.expected_instance_id,
+            expected_instance_type=args.expected_instance_type,
+            expected_region=args.expected_region,
+            expected_ami_id=args.expected_ami_id,
+            expected_account_id=args.expected_account_id,
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("x", encoding="utf-8") as handle:
         json.dump(record, handle, allow_nan=False, indent=2, sort_keys=True)
