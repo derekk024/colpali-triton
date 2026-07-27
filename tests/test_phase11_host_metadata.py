@@ -155,6 +155,19 @@ def test_exact_g6_l4_host_and_container_evidence_passes() -> None:
     assert result["expected"]["source_commit"] == SOURCE_COMMIT
 
 
+def test_new_region_prefix_and_non_rfc1918_vpc_address_pass() -> None:
+    record = _valid_record()
+    identity = record["ec2"]["identity_document"]
+    identity["region"] = "eusc-de-east-1"
+    identity["availabilityZone"] = "eusc-de-east-1a"
+    identity["privateIp"] = "100.64.0.10"
+
+    result = host_metadata.validate_host_evidence(record, _contract())
+
+    assert result["status"] == "passed"
+    assert result["errors"] == []
+
+
 @pytest.mark.parametrize("instance_type", ("g6.xlarge", "g6.2xlarge"))
 def test_both_scoped_g6_instance_types_pass(instance_type: str) -> None:
     record = _valid_record()

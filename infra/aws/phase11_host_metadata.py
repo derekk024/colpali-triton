@@ -22,7 +22,9 @@ ENVIRONMENT_CONFIG_PATH = Path(__file__).with_name("l4_environment.json")
 REQUIRED_INSTANCE_TYPES = frozenset({"g6.xlarge", "g6.2xlarge"})
 AMI_PATTERN = re.compile(r"^ami-[0-9a-f]{8,17}$")
 INSTANCE_PATTERN = re.compile(r"^i-[0-9a-f]{8,17}$")
-REGION_PATTERN = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)+-\d$")
+REGION_PATTERN = re.compile(
+    r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)+-\d+$"
+)
 ACCOUNT_PATTERN = re.compile(r"^\d{12}$")
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
@@ -281,14 +283,19 @@ def _parse_docker_image(raw: object) -> Mapping[str, Any] | None:
     return value[0]
 
 
-def _valid_private_ip(value: object) -> bool:
+def _valid_instance_ip(value: object) -> bool:
     if not isinstance(value, str):
         return False
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
         return False
-    return address.version == 4 and address.is_private
+    return not (
+        address.is_unspecified
+        or address.is_loopback
+        or address.is_multicast
+        or address.is_link_local
+    )
 
 
 def _validate_nvidia_smi(
@@ -520,8 +527,8 @@ def validate_host_evidence(
             or not availability_zone.startswith(region)
         ):
             errors.append("EC2 availability zone does not match its region")
-        if not _valid_private_ip(identity.get("privateIp")):
-            errors.append("EC2 private IPv4 identity is invalid")
+        if not _valid_instance_ip(identity.get("privateIp")):
+            errors.append("EC2 instance IP identity is invalid")
         version = identity.get("version")
         if not isinstance(version, str) or not DATE_PATTERN.fullmatch(version):
             errors.append("EC2 identity document version is invalid")

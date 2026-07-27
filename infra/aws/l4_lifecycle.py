@@ -33,7 +33,9 @@ AMI_PATTERN = re.compile(r"^ami-[0-9a-f]{8,17}$")
 SUBNET_PATTERN = re.compile(r"^subnet-[0-9a-f]{8,17}$")
 SECURITY_GROUP_PATTERN = re.compile(r"^sg-[0-9a-f]{8,17}$")
 INSTANCE_PATTERN = re.compile(r"^i-[0-9a-f]{8,17}$")
-REGION_PATTERN = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)+-\d$")
+REGION_PATTERN = re.compile(
+    r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)+-\d+$"
+)
 KEY_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_+=,.@-]{1,255}$")
 CLIENT_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 TAG_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9 _.:/=+@-]{1,128}$")

@@ -301,6 +301,18 @@ def test_launch_spec_rejects_implicit_or_out_of_scope_values(
         lifecycle.launch_spec_from_args(args, config)
 
 
+def test_launch_spec_accepts_current_multi_segment_region_prefix() -> None:
+    config = lifecycle.load_environment_config()
+    spec = _launch_spec(region="eusc-de-east-1")
+
+    parsed = lifecycle.launch_spec_from_args(
+        type("Args", (), spec.__dict__),
+        config,
+    )
+
+    assert parsed.region == "eusc-de-east-1"
+
+
 def test_termination_default_is_offline_and_exact_id_is_required() -> None:
     planned = _offline_command(
         "terminate",
