@@ -499,3 +499,21 @@ def test_source_commit_provenance_requires_agreement(
         runner._source_commit_provenance(
             {"commit": commit, "available": True}
         )
+
+
+def test_source_commit_provenance_requires_one_exact_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runner, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("COLPALI_SOURCE_COMMIT", raising=False)
+
+    with pytest.raises(RuntimeError, match="exact source commit"):
+        runner._source_commit_provenance(
+            {"commit": None, "available": False}
+        )
+
+    monkeypatch.setenv("COLPALI_SOURCE_COMMIT", "A" * 40)
+    with pytest.raises(RuntimeError, match="full lowercase Git SHA"):
+        runner._source_commit_provenance(
+            {"commit": None, "available": False}
+        )

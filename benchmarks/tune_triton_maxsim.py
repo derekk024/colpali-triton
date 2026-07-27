@@ -1159,14 +1159,20 @@ def _validated_source_commit(
         return None
     if not isinstance(value, str):
         raise RuntimeError(f"{source} source commit must be a string")
-    commit = value.strip().lower()
+    commit = value.strip()
     if commit in ("", "unknown"):
         return None
-    if len(commit) != 40 or any(
-        character not in "0123456789abcdef" for character in commit
+    if (
+        commit != commit.lower()
+        or len(commit) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in commit
+        )
     ):
         raise RuntimeError(
-            f"{source} source commit is not a full Git SHA: {value!r}"
+            f"{source} source commit is not a full lowercase Git SHA: "
+            f"{value!r}"
         )
     return commit
 
@@ -1197,6 +1203,11 @@ def _source_commit_provenance(
         raise RuntimeError(
             "source commit provenance disagrees across Git, "
             "COLPALI_SOURCE_COMMIT, and .source_commit"
+        )
+    if not distinct:
+        raise RuntimeError(
+            "an exact source commit is required from Git, "
+            "COLPALI_SOURCE_COMMIT, or .source_commit"
         )
     return {
         "effective_commit": next(iter(distinct), None),
