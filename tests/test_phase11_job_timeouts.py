@@ -173,6 +173,12 @@ def test_timed_out_containers_are_force_removed_by_cid() -> None:
     assert '--cidfile "${NCU_CID_FILE}"' in script
     assert '--cidfile "${NSYS_CID_FILE}"' in script
     assert 'docker rm --force "${CONTAINER_ID}"' in script
+    cleanup_start = script.index("cleanup_timed_container()")
+    cleanup_end = script.index("\n}\n", cleanup_start)
+    cleanup = script[cleanup_start:cleanup_end]
+    assert "--kill-after=5s" in cleanup
+    assert "30s" in cleanup
+    assert 'rm -f "${CID_FILE}"' not in cleanup
     assert (
         "EXIT_CODE == 124 || EXIT_CODE == 137 || EXIT_CODE == 143"
         in script
@@ -188,6 +194,32 @@ def test_timed_out_containers_are_force_removed_by_cid() -> None:
         script,
     )
     assert 'rmdir "${CID_DIRECTORY}"' in script
+
+
+def test_normal_sealing_requires_zero_exactly_labeled_containers() -> None:
+    script = JOB_PATH.read_text()
+    check_start = script.index(
+        'FINAL_CONTAINER_CHECK_LOG="${RESULT_DIRECTORY}/'
+        'final_container_check.log"'
+    )
+    seal_start = script.index(
+        'python3 - "${RESULT_DIRECTORY}/step_status.json"',
+        check_start,
+    )
+    check = script[check_start:seal_start]
+
+    assert "timeout \\\n" in check
+    assert "--kill-after=5s" in check
+    assert "30s" in check
+    assert "docker ps -aq" in check
+    assert "label=colpali.phase11.run_id=${RUN_ID}" in check
+    assert "label=colpali.phase11.source_commit=${SOURCE_COMMIT}" in check
+    assert "FINAL_CONTAINER_CHECK_EXIT != 0" in check
+    assert '[[ -n "${FINAL_CONTAINER_IDS//[[:space:]]/}" ]]' in check
+    assert "exit 75" in check
+    assert "exit 76" in check
+    assert "exit 77" in check
+    assert 'rm -f -- "${CID_FILE}"' in check
 
 
 def test_profiler_overwrite_flags_match_each_profiler_cli() -> None:

@@ -219,7 +219,11 @@ cleanup_timed_container() {
         local CONTAINER_ID
         CONTAINER_ID="$(<"${CID_FILE}")"
         if [[ "${CONTAINER_ID}" =~ ^[0-9a-f]{12,64}$ ]]; then
-            docker rm --force "${CONTAINER_ID}" \
+            timeout \
+                --signal=TERM \
+                --kill-after=5s \
+                30s \
+                docker rm --force "${CONTAINER_ID}" \
                 > "${RESULT_DIRECTORY}/${STEP_NAME}_container_cleanup.log" \
                 2>&1
         else
@@ -227,7 +231,10 @@ cleanup_timed_container() {
                 > "${RESULT_DIRECTORY}/${STEP_NAME}_container_cleanup.log"
         fi
     fi
-    rm -f "${CID_FILE}"
+    # Keep every cidfile until the final exact-label query proves that no
+    # container from this run remains. The recovery finalizer uses the same
+    # files if normal sealing has to abort.
+    return 0
 }
 
 DOCKER_OPTIONS=(
@@ -772,7 +779,44 @@ if (( PROFILING_STATUS_EXIT != 0 )) \
         > "${RESULT_DIRECTORY}/profiling_status.json"
 fi
 
-rmdir "${CID_DIRECTORY}"
+FINAL_CONTAINER_CHECK_LOG="${RESULT_DIRECTORY}/final_container_check.log"
+FINAL_CONTAINER_IDS="$(
+    timeout \
+        --signal=TERM \
+        --kill-after=5s \
+        30s \
+        docker ps -aq \
+        --filter "label=colpali.phase11.run_id=${RUN_ID}" \
+        --filter "label=colpali.phase11.source_commit=${SOURCE_COMMIT}" \
+        2> "${FINAL_CONTAINER_CHECK_LOG}"
+)"
+FINAL_CONTAINER_CHECK_EXIT=$?
+printf 'exit_code=%s\ncontainer_ids=%s\n' \
+    "${FINAL_CONTAINER_CHECK_EXIT}" \
+    "${FINAL_CONTAINER_IDS}" \
+    >> "${FINAL_CONTAINER_CHECK_LOG}"
+if (( FINAL_CONTAINER_CHECK_EXIT != 0 )); then
+    printf '%s\n' \
+        "Refusing normal sealing: final Docker label query failed" \
+        >> "${FINAL_CONTAINER_CHECK_LOG}"
+    exit 75
+fi
+if [[ -n "${FINAL_CONTAINER_IDS//[[:space:]]/}" ]]; then
+    printf '%s\n' \
+        "Refusing normal sealing: exact-run containers remain" \
+        >> "${FINAL_CONTAINER_CHECK_LOG}"
+    exit 76
+fi
+for CID_FILE in "${CID_DIRECTORY}"/*.cid; do
+    [[ -e "${CID_FILE}" ]] || continue
+    rm -f -- "${CID_FILE}"
+done
+if ! rmdir "${CID_DIRECTORY}"; then
+    printf '%s\n' \
+        "Refusing normal sealing: cidfile directory is not empty" \
+        >> "${FINAL_CONTAINER_CHECK_LOG}"
+    exit 77
+fi
 
 export \
     COMMAND_CONTRACT_EXIT CONTAINER_BUILD_EXIT HARDWARE_GATE_EXIT \

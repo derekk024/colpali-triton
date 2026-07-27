@@ -187,6 +187,136 @@ def test_execute_requires_exact_cost_acknowledgement() -> None:
     assert "--acknowledge-cost must exactly equal" in completed.stderr
 
 
+@pytest.mark.parametrize(
+    ("revision_returncode", "revision", "status", "message"),
+    (
+        (1, "", "", "resolvable 40-character"),
+        (0, "a" * 40, " M infra/aws/user_data.sh\n", "clean worktree"),
+    ),
+)
+def test_billable_launch_requires_clean_committed_source(
+    monkeypatch: pytest.MonkeyPatch,
+    revision_returncode: int,
+    revision: str,
+    status: str,
+    message: str,
+) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        if "rev-parse" in command:
+            return subprocess.CompletedProcess(
+                command,
+                revision_returncode,
+                revision + ("\n" if revision else ""),
+                "",
+            )
+        if "status" in command:
+            return subprocess.CompletedProcess(command, 0, status, "")
+        raise AssertionError(command)
+
+    monkeypatch.setattr(lifecycle.subprocess, "run", fake_run)
+
+    with pytest.raises(lifecycle.LifecycleError, match=message):
+        lifecycle._require_clean_source_commit()
+
+    assert len(calls) == 2
+    assert all(
+        kwargs["timeout"] == lifecycle.LOCAL_GIT_TIMEOUT_SECONDS
+        for _, kwargs in calls
+    )
+
+
+def _executed_launch_args(tmp_path: Path):
+    return type(
+        "Args",
+        (),
+        {
+            "command": "launch",
+            "region": "us-west-2",
+            "subnet_id": "subnet-0123456789abcdef0",
+            "security_group_id": "sg-0123456789abcdef0",
+            "key_name": "colpali-benchmark",
+            "instance_type": "g6.xlarge",
+            "root_volume_gib": 100,
+            "associate_public_ip": False,
+            "name": "colpali-triton-phase10",
+            "profile": None,
+            "client_token": None,
+            "ami_id": None,
+            "execute": True,
+            "acknowledge_cost": lifecycle.LAUNCH_ACKNOWLEDGEMENT,
+            "receipt": tmp_path / "launch.json",
+        },
+    )
+
+
+def test_source_gate_precedes_every_aws_launch_operation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        lifecycle,
+        "_require_clean_source_commit",
+        lambda: (_ for _ in ()).throw(
+            lifecycle.LifecycleError("worktree is dirty")
+        ),
+    )
+    monkeypatch.setattr(
+        lifecycle.shutil,
+        "which",
+        lambda name: pytest.fail("AWS executable check must not run"),
+    )
+
+    with pytest.raises(lifecycle.LifecycleError, match="worktree is dirty"):
+        lifecycle._handle_plan_or_launch(
+            _executed_launch_args(tmp_path),
+            lifecycle.load_environment_config(),
+        )
+
+
+def test_source_change_during_aws_preparation_blocks_run_instances(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    commits = iter(("a" * 40, "b" * 40))
+    monkeypatch.setattr(
+        lifecycle,
+        "_require_clean_source_commit",
+        lambda: next(commits),
+    )
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: "/usr/bin/aws")
+    monkeypatch.setattr(
+        lifecycle,
+        "_resolve_ami",
+        lambda spec, config: "ami-0123456789abcdef0",
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_describe_and_validate_ami",
+        lambda spec, config, ami_id: {"image_id": ami_id},
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_validate_aws_dry_run",
+        lambda command: None,
+    )
+    monkeypatch.setattr(
+        lifecycle,
+        "_run_command",
+        lambda command: pytest.fail("run-instances must not execute"),
+    )
+
+    with pytest.raises(lifecycle.LifecycleError, match="source changed"):
+        lifecycle._handle_plan_or_launch(
+            _executed_launch_args(tmp_path),
+            lifecycle.load_environment_config(),
+        )
+
+    assert not (tmp_path / "launch.json").exists()
+
+
 def test_launch_command_has_explicit_security_and_cost_controls() -> None:
     config = lifecycle.load_environment_config()
     spec = _launch_spec()

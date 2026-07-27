@@ -39,6 +39,8 @@ REGION_PATTERN = re.compile(
 KEY_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_+=,.@-]{1,255}$")
 CLIENT_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 TAG_VALUE_PATTERN = re.compile(r"^[A-Za-z0-9 _.:/=+@-]{1,128}$")
+COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+LOCAL_GIT_TIMEOUT_SECONDS = 30
 
 
 class LifecycleError(RuntimeError):
@@ -541,17 +543,52 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
-def _git_commit() -> str | None:
-    completed = subprocess.run(
-        ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.returncode != 0:
-        return None
-    commit = completed.stdout.strip()
-    return commit if re.fullmatch(r"[0-9a-f]{40}", commit) else None
+def _require_clean_source_commit() -> str:
+    """Return HEAD only when the exact launch source is committed and clean."""
+
+    try:
+        revision = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+        )
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(PROJECT_ROOT),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=LOCAL_GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise LifecycleError(
+            "launch source Git inspection exceeded its 30-second bound"
+        ) from exc
+    except OSError as exc:
+        raise LifecycleError(
+            f"cannot inspect the launch source with Git: {exc}"
+        ) from exc
+    commit = revision.stdout.strip()
+    if revision.returncode != 0 or not COMMIT_PATTERN.fullmatch(commit):
+        raise LifecycleError(
+            "launch requires a resolvable 40-character Git HEAD"
+        )
+    if status.returncode != 0:
+        raise LifecycleError("launch cannot inspect the Git worktree")
+    if status.stdout:
+        raise LifecycleError(
+            "launch requires a clean worktree with every source change "
+            "committed"
+        )
+    return commit
 
 
 def _file_sha256(path: Path) -> str:
@@ -630,6 +667,11 @@ def _handle_plan_or_launch(
             "launch refused: --acknowledge-cost must exactly equal "
             f"{LAUNCH_ACKNOWLEDGEMENT!r}"
         )
+    source_commit = _require_clean_source_commit()
+    user_data_path = (
+        PROJECT_ROOT / config["bootstrap"]["user_data_path"]
+    )
+    user_data_sha256 = _file_sha256(user_data_path)
     if shutil.which("aws") is None:
         raise LifecycleError("AWS CLI is not installed")
     receipt_path = args.receipt.resolve()
@@ -648,6 +690,13 @@ def _handle_plan_or_launch(
         dry_run=True,
     )
     _validate_aws_dry_run(dry_run_command)
+    if (
+        _require_clean_source_commit() != source_commit
+        or _file_sha256(user_data_path) != user_data_sha256
+    ):
+        raise LifecycleError(
+            "launch source changed during AWS preparation; rerun the plan"
+        )
     launch_command = build_launch_command(
         spec,
         config,
@@ -671,10 +720,8 @@ def _handle_plan_or_launch(
         "operation": "launch",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "config_fingerprint": canonical_fingerprint(config),
-        "source_commit": _git_commit(),
-        "user_data_sha256": _file_sha256(
-            PROJECT_ROOT / config["bootstrap"]["user_data_path"]
-        ),
+        "source_commit": source_commit,
+        "user_data_sha256": user_data_sha256,
         "resolved_ami": image_record,
         "instance_id": instance_id,
         "instance_type": spec.instance_type,
