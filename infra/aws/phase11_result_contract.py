@@ -81,7 +81,10 @@ def _effective_source(value: object) -> tuple[str | None, bool]:
 def _is_finite_number(value: object, *, positive: bool = False) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return False
     return math.isfinite(number) and (number > 0.0 if positive else True)
 
 
@@ -219,6 +222,8 @@ def _validate_tuning_evidence(
     launch: object,
     errors: list[str],
 ) -> None:
+    if not isinstance(winner_id, str) or not isinstance(launch, dict):
+        return
     protocol = tuning.get("protocol")
     protocol_config = (
         protocol.get("config") if isinstance(protocol, dict) else None
