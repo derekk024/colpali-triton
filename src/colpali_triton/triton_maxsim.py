@@ -109,6 +109,15 @@ def _require_triton() -> None:
 if triton is not None and tl is not None:
 
     @triton.jit
+    def _maximum_propagate_nan(left, right):
+        # ``torch.amax`` propagates an active NaN. Triton's ``tl.max`` is
+        # implemented with ``tl.maximum(..., PropagateNan.NONE)`` in 3.2.0,
+        # so use an explicit combiner to preserve the reference contract.
+        return tl.maximum(
+            left, right, propagate_nan=tl.PropagateNan.ALL
+        )
+
+    @triton.jit
     def _maxsim_partial_kernel(
         query_pointer,
         document_pointer,
@@ -218,8 +227,13 @@ if triton is not None and tl is not None:
                 similarities,
                 -float("inf"),
             )
+            document_tile_maxima = tl.reduce(
+                similarities, 1, _maximum_propagate_nan
+            )
             maxima = tl.maximum(
-                maxima, tl.max(similarities, axis=1)
+                maxima,
+                document_tile_maxima,
+                propagate_nan=tl.PropagateNan.ALL,
             )
 
         maxima = tl.where(query_is_active, maxima, 0.0)
@@ -255,6 +269,7 @@ if triton is not None and tl is not None:
         )
 
 else:
+    _maximum_propagate_nan = None
     _maxsim_partial_kernel = None
     _maxsim_reduce_kernel = None
 
@@ -346,6 +361,9 @@ def _launch_maxsim(
         num_warps=config.num_warps,
         num_stages=config.num_stages,
     )
+
+    if query_block_count == 1:
+        return partials.view(query_batch_size, document_batch_size)
 
     scores = torch.empty(
         pair_count, dtype=torch.float32, device=queries.device

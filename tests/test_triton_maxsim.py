@@ -276,6 +276,68 @@ def test_no_grad_mode_executes_forward_launcher_for_grad_tensors(
     assert not result.requires_grad
 
 
+def test_single_query_block_skips_reduction_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    class PartialKernel:
+        def __getitem__(self, grid: tuple) -> Callable[..., None]:
+            captured["grid"] = grid
+
+            def launch(*arguments: object, **kwargs: object) -> None:
+                del kwargs
+                partials = arguments[4]
+                assert isinstance(partials, Tensor)
+                captured["partials"] = partials
+                partials.copy_(
+                    torch.arange(
+                        partials.numel(), dtype=partials.dtype
+                    ).view_as(partials)
+                )
+
+            return launch
+
+    class UnexpectedReductionKernel:
+        def __getitem__(self, grid: tuple) -> Callable[..., None]:
+            del grid
+            raise AssertionError(
+                "one query block must not launch the reduction kernel"
+            )
+
+    monkeypatch.setattr(subject, "_require_triton", lambda: None)
+    monkeypatch.setattr(
+        subject, "_maxsim_partial_kernel", PartialKernel()
+    )
+    monkeypatch.setattr(
+        subject, "_maxsim_reduce_kernel", UnexpectedReductionKernel()
+    )
+    queries = torch.empty(2, 15, 128)
+    documents = torch.empty(3, 9, 128)
+    query_mask = torch.ones(2, 15, dtype=torch.bool)
+    document_mask = torch.ones(3, 9, dtype=torch.bool)
+
+    actual = subject._launch_maxsim(
+        queries,
+        documents,
+        query_mask,
+        document_mask,
+        DEFAULT_TRITON_MAXSIM_CONFIG,
+    )
+
+    assert captured["grid"] == (6, 1)
+    assert actual.shape == (2, 3)
+    torch.testing.assert_close(
+        actual, torch.arange(6, dtype=torch.float32).view(2, 3)
+    )
+    partials = captured["partials"]
+    assert isinstance(partials, Tensor)
+    assert (
+        actual.untyped_storage().data_ptr()
+        == partials.untyped_storage().data_ptr()
+    )
+
+
 def _cuda_triton_available() -> bool:
     return torch.cuda.is_available() and triton_is_available()
 
@@ -384,3 +446,46 @@ def test_cuda_kernel_handles_noncontiguous_inputs_and_empty_masks() -> None:
     torch.testing.assert_close(actual[0], torch.zeros(3))
     assert torch.isneginf(actual[1, 1])
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.skipif(
+    not _cuda_triton_available(),
+    reason="CUDA and Triton are required",
+)
+def test_cuda_kernel_propagates_active_nan_across_document_tiles() -> None:
+    queries = torch.zeros(1, 1, 128, device="cuda")
+    queries[0, 0, 0] = 1.0
+    documents = torch.zeros(1, 65, 128, device="cuda")
+    documents[0, 0, 0] = 2.0
+    documents[0, 64, 0] = float("nan")
+    document_mask = torch.ones(1, 65, dtype=torch.bool, device="cuda")
+    config = TritonMaxSimConfig(block_document_tokens=64)
+
+    actual = maxsim_triton(
+        queries,
+        documents,
+        document_mask=document_mask,
+        config=config,
+    )
+    expected = maxsim_vectorized(
+        queries,
+        documents,
+        document_mask=document_mask,
+    )
+
+    assert torch.isnan(expected).all()
+    assert torch.isnan(actual).all()
+
+    document_mask[0, 64] = False
+    masked_actual = maxsim_triton(
+        queries,
+        documents,
+        document_mask=document_mask,
+        config=config,
+    )
+    masked_expected = maxsim_vectorized(
+        queries,
+        documents,
+        document_mask=document_mask,
+    )
+    torch.testing.assert_close(masked_actual, masked_expected)
