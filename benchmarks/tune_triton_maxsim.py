@@ -426,7 +426,10 @@ def semantic_config_fingerprint(config: TuningConfig) -> str:
     """Hash the validated config independent of JSON whitespace."""
 
     encoded = json.dumps(
-        config.to_dict(), sort_keys=True, separators=(",", ":")
+        config.to_dict(),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
     return sha256(encoded).hexdigest()
 
@@ -653,8 +656,18 @@ def _agreement_record(
     finite = bool(torch.isfinite(actual_float).all().item())
     difference = (actual_float - expected_float).abs()
     relative = difference / expected_float.abs().clamp_min(1e-12)
-    maximum_absolute_error = float(difference.max().item())
-    maximum_relative_error = float(relative.max().item())
+    raw_maximum_absolute_error = float(difference.max().item())
+    raw_maximum_relative_error = float(relative.max().item())
+    maximum_absolute_error = (
+        raw_maximum_absolute_error
+        if math.isfinite(raw_maximum_absolute_error)
+        else None
+    )
+    maximum_relative_error = (
+        raw_maximum_relative_error
+        if math.isfinite(raw_maximum_relative_error)
+        else None
+    )
     agreement = finite and bool(
         torch.allclose(
             actual_float,
@@ -675,6 +688,18 @@ def _agreement_record(
         "maximum_absolute_error": maximum_absolute_error,
         "maximum_relative_error": maximum_relative_error,
     }
+
+
+def _failure_cleanup_synchronization(
+    device: torch.device,
+) -> Optional[str]:
+    """Best-effort synchronization without replacing a workload failure."""
+
+    try:
+        torch.cuda.synchronize(device)
+    except Exception as error:
+        return f"{type(error).__name__}: {error}"
+    return None
 
 
 def _numerical_gate(
@@ -705,15 +730,14 @@ def _numerical_gate(
         )
         del actual
     except Exception as error:
-        torch.cuda.synchronize(device)
+        failed_wall_ms = (perf_counter() - started) * 1000.0
+        cleanup_error = _failure_cleanup_synchronization(device)
         return {
             "status": "execution_failed",
-            "cold_compile_and_call_wall_ms": (
-                perf_counter() - started
-            )
-            * 1000.0,
+            "cold_compile_and_call_wall_ms": failed_wall_ms,
             "agreement": None,
             "error": f"{type(error).__name__}: {error}",
+            "cleanup_synchronization_error": cleanup_error,
         }
     return {
         "status": (
@@ -722,6 +746,7 @@ def _numerical_gate(
         "cold_compile_and_call_wall_ms": wall_ms,
         "agreement": agreement,
         "error": None,
+        "cleanup_synchronization_error": None,
     }
 
 
@@ -753,14 +778,17 @@ def _warm_candidate(
             "iterations": iterations,
             "total_wall_ms": wall_ms,
             "error": None,
+            "cleanup_synchronization_error": None,
         }
     except Exception as error:
-        torch.cuda.synchronize(device)
+        failed_wall_ms = (perf_counter() - started) * 1000.0
+        cleanup_error = _failure_cleanup_synchronization(device)
         return {
             "status": "failed",
             "iterations": iterations,
-            "total_wall_ms": (perf_counter() - started) * 1000.0,
+            "total_wall_ms": failed_wall_ms,
             "error": f"{type(error).__name__}: {error}",
+            "cleanup_synchronization_error": cleanup_error,
         }
 
 
@@ -824,20 +852,20 @@ def _time_trial(
                 ),
             },
             "error": None,
+            "cleanup_synchronization_error": None,
         }
     except Exception as error:
-        torch.cuda.synchronize(device)
+        failed_wall_ms = (perf_counter() - host_started) * 1000.0
+        cleanup_error = _failure_cleanup_synchronization(device)
         return {
             "status": "failed",
             "trial_index": trial_index,
             "cuda_event_latency_ms": [],
-            "host_wall_total_ms": (
-                perf_counter() - host_started
-            )
-            * 1000.0,
+            "host_wall_total_ms": failed_wall_ms,
             "host_wall_per_call_ms": None,
             "memory": None,
             "error": f"{type(error).__name__}: {error}",
+            "cleanup_synchronization_error": cleanup_error,
         }
 
 
@@ -1230,6 +1258,7 @@ def _environment(
     properties = torch.cuda.get_device_properties(device)
     free_bytes, total_bytes = torch.cuda.mem_get_info(device)
     return {
+        "captured_at_utc": _utc_now(),
         "colpali_triton_version": __version__,
         "python": {
             "version": platform.python_version(),
@@ -1265,8 +1294,8 @@ def _environment(
             "index": device.index,
             "name": properties.name,
             "total_memory_bytes": int(properties.total_memory),
-            "free_memory_bytes_at_start": int(free_bytes),
-            "memory_total_bytes_at_start": int(total_bytes),
+            "free_memory_bytes": int(free_bytes),
+            "memory_total_bytes": int(total_bytes),
             "compute_capability": [
                 int(properties.major),
                 int(properties.minor),
@@ -1341,6 +1370,7 @@ def run_tuning(
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
+    environment_at_start = _environment(device, config)
 
     dtype_by_name = {item.name: item for item in config.dtypes}
     case_by_name = {item.name: item for item in config.cases}
@@ -1566,13 +1596,16 @@ def run_tuning(
         if winner_id is not None
         else "completed_without_eligible_candidate"
     )
+    environment_at_end = _environment(device, config)
+    completed_at = _utc_now()
+    wall_duration_seconds = perf_counter() - wall_started
     return {
         "schema_version": 1,
         "kind": "triton_maxsim_tuning",
         "status": status,
         "started_at_utc": started_at,
-        "completed_at_utc": _utc_now(),
-        "wall_duration_seconds": perf_counter() - wall_started,
+        "completed_at_utc": completed_at,
+        "wall_duration_seconds": wall_duration_seconds,
         "selection": {
             "canonical_full_matrix": canonical,
             "candidates": list(candidate_ids),
@@ -1623,7 +1656,10 @@ def run_tuning(
             },
         },
         "preflight": preflight,
-        "environment": _environment(device, config),
+        "environment": {
+            "start": environment_at_start,
+            "end": environment_at_end,
+        },
         "winner": {
             "candidate_id": winner_id,
             "configuration": winner_config,
@@ -1679,6 +1715,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     },
                     indent=2,
                     sort_keys=True,
+                    allow_nan=False,
                 )
             )
             return 0
@@ -1709,6 +1746,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "workload_count": len(result["results"]),
                 },
                 sort_keys=True,
+                allow_nan=False,
             )
         )
         return 0 if result["status"] == "completed" else 3

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List
@@ -217,6 +218,24 @@ def test_numerical_agreement_record_exposes_rejection() -> None:
     assert wrong_shape["shape_matches"] is False
 
 
+@pytest.mark.parametrize("nonfinite", [math.nan, math.inf, -math.inf])
+def test_numerical_agreement_uses_null_for_nonfinite_error_metrics(
+    nonfinite: float,
+) -> None:
+    record = runner._agreement_record(
+        torch.tensor([[nonfinite]]),
+        torch.tensor([[1.0]]),
+        dtype_spec=CONFIG.dtypes[0],
+    )
+
+    assert record["finite"] is False
+    assert record["agreement"] is False
+    assert record["maximum_absolute_error"] is None
+    assert record["maximum_relative_error"] is None
+    assert "NaN" not in json.dumps(record, allow_nan=False)
+    assert "Infinity" not in json.dumps(record, allow_nan=False)
+
+
 def test_rejected_candidate_never_reaches_warmup_or_timing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -239,9 +258,19 @@ def test_rejected_candidate_never_reaches_warmup_or_timing(
     documents = torch.ones((1, 3, 2), dtype=torch.float16)
     query_mask = torch.ones((1, 2), dtype=torch.bool)
     document_mask = torch.ones((1, 3), dtype=torch.bool)
+    environment_snapshots: List[Dict[str, int]] = []
 
     def incorrect_provider(*args: object, **kwargs: object) -> torch.Tensor:
         return torch.tensor([[99.0]])
+
+    def make_inputs(*args: object, **kwargs: object) -> object:
+        assert len(environment_snapshots) == 1
+        return queries, documents, query_mask, document_mask
+
+    def capture_environment(*args: object, **kwargs: object) -> object:
+        snapshot = {"capture_index": len(environment_snapshots)}
+        environment_snapshots.append(snapshot)
+        return snapshot
 
     monkeypatch.setattr(
         runner,
@@ -257,12 +286,7 @@ def test_rejected_candidate_never_reaches_warmup_or_timing(
     monkeypatch.setattr(
         runner,
         "_make_inputs",
-        lambda *args, **kwargs: (
-            queries,
-            documents,
-            query_mask,
-            document_mask,
-        ),
+        make_inputs,
     )
     monkeypatch.setattr(
         runner.torch.cuda, "set_device", lambda device: None
@@ -291,7 +315,7 @@ def test_rejected_candidate_never_reaches_warmup_or_timing(
         ),
     )
     monkeypatch.setattr(
-        runner, "_environment", lambda *args, **kwargs: {}
+        runner, "_environment", capture_environment
     )
     monkeypatch.setattr(
         runner,
@@ -315,6 +339,14 @@ def test_rejected_candidate_never_reaches_warmup_or_timing(
     assert result["status"] == "completed_without_eligible_candidate"
     assert candidate_result["status"] == "numerical_rejected"
     assert candidate_result["timing"] is None
+    assert environment_snapshots == [
+        {"capture_index": 0},
+        {"capture_index": 1},
+    ]
+    assert result["environment"] == {
+        "start": {"capture_index": 0},
+        "end": {"capture_index": 1},
+    }
 
 
 def test_trial_order_is_deterministic_and_trial_specific() -> None:
@@ -400,6 +432,132 @@ def test_cuda_event_trial_retains_every_sample(
     assert len(synchronizations) == 1
     assert trial["memory"]["incremental_peak_allocated_bytes"] == 50
     assert trial["memory"]["incremental_peak_reserved_bytes"] == 75
+    assert trial["cleanup_synchronization_error"] is None
+
+
+def test_failure_cleanup_does_not_replace_primary_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = torch.device("cpu")
+    queries = torch.ones((1, 2, 2))
+    documents = torch.ones((1, 3, 2))
+    query_mask = torch.ones((1, 2), dtype=torch.bool)
+    document_mask = torch.ones((1, 3), dtype=torch.bool)
+
+    def primary_failure(*args: object, **kwargs: object) -> torch.Tensor:
+        raise ValueError("primary workload failure")
+
+    synchronization_count = 0
+
+    def numerical_synchronize(device: object = None) -> None:
+        nonlocal synchronization_count
+        synchronization_count += 1
+        if synchronization_count == 2:
+            raise RuntimeError("cleanup synchronization failure")
+
+    monkeypatch.setattr(
+        runner.torch.cuda, "synchronize", numerical_synchronize
+    )
+    numerical = runner._numerical_gate(
+        primary_failure,
+        queries=queries,
+        documents=documents,
+        query_mask=query_mask,
+        document_mask=document_mask,
+        reference=torch.ones((1, 1)),
+        dtype_spec=CONFIG.dtypes[0],
+        device=device,
+    )
+    assert numerical["error"] == "ValueError: primary workload failure"
+    assert numerical["cleanup_synchronization_error"] == (
+        "RuntimeError: cleanup synchronization failure"
+    )
+
+    def cleanup_failure(device: object = None) -> None:
+        raise RuntimeError("cleanup synchronization failure")
+
+    monkeypatch.setattr(
+        runner.torch.cuda, "synchronize", cleanup_failure
+    )
+    warmup = runner._warm_candidate(
+        primary_failure,
+        queries=queries,
+        documents=documents,
+        query_mask=query_mask,
+        document_mask=document_mask,
+        iterations=1,
+        device=device,
+    )
+    assert warmup["error"] == "ValueError: primary workload failure"
+    assert warmup["cleanup_synchronization_error"] == (
+        "RuntimeError: cleanup synchronization failure"
+    )
+
+    class FakeEvent:
+        def __init__(self, *, enable_timing: bool) -> None:
+            assert enable_timing is True
+
+        def record(self) -> None:
+            return None
+
+    monkeypatch.setattr(runner.torch.cuda, "Event", FakeEvent)
+    monkeypatch.setattr(
+        runner.torch.cuda, "memory_allocated", lambda device: 0
+    )
+    monkeypatch.setattr(
+        runner.torch.cuda, "memory_reserved", lambda device: 0
+    )
+    monkeypatch.setattr(
+        runner.torch.cuda, "reset_peak_memory_stats", lambda device: None
+    )
+    trial = runner._time_trial(
+        primary_failure,
+        queries=queries,
+        documents=documents,
+        query_mask=query_mask,
+        document_mask=document_mask,
+        measured_iterations=1,
+        device=device,
+        trial_index=0,
+    )
+    assert trial["error"] == "ValueError: primary workload failure"
+    assert trial["cleanup_synchronization_error"] == (
+        "RuntimeError: cleanup synchronization failure"
+    )
+
+
+def test_environment_snapshot_uses_capture_neutral_memory_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    properties = SimpleNamespace(
+        name="NVIDIA L4",
+        total_memory=24,
+        major=8,
+        minor=9,
+    )
+    monkeypatch.setattr(
+        runner.torch.cuda,
+        "get_device_properties",
+        lambda device: properties,
+    )
+    monkeypatch.setattr(
+        runner.torch.cuda, "mem_get_info", lambda device: (12, 24)
+    )
+    monkeypatch.setattr(
+        runner.torch.cuda, "get_arch_list", lambda: ["sm_89"]
+    )
+    monkeypatch.setattr(
+        runner, "_nvidia_smi_snapshot", lambda: {"available": True}
+    )
+
+    snapshot = runner._environment(torch.device("cuda", 0), CONFIG)
+    device = snapshot["cuda_device"]
+
+    assert snapshot["captured_at_utc"].endswith("Z")
+    assert device["free_memory_bytes"] == 12
+    assert device["memory_total_bytes"] == 24
+    assert "free_memory_bytes_at_start" not in device
+    assert "memory_total_bytes_at_start" not in device
 
 
 def _completed_candidate(

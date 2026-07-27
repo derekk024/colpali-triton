@@ -67,7 +67,10 @@ from the exact candidate inputs. Every Triton candidate then performs its cold
 compile/call and must agree with that reference before it can warm up or enter
 timing. Compilation failures, non-finite output, shape differences, numerical
 rejections, warmup failures, and timing failures stay in the result; rejected
-candidates are never timed.
+candidates are never timed. Non-finite error magnitudes are represented as
+JSON `null`, and artifact serialization rejects non-standard `NaN` or
+`Infinity` values. If failure cleanup cannot synchronize CUDA, the original
+failure remains primary and the cleanup error is recorded separately.
 
 Steady-state calls use one pair of `torch.cuda.Event` objects per invocation.
 One synchronization follows each candidate trial. Candidate order is
@@ -86,7 +89,9 @@ The artifact records the raw and semantic config digests, per-source digests,
 an aggregate source/config fingerprint, Git state, container source markers,
 package versions, PyTorch/CUDA/cuDNN details, exact GPU identity and properties,
 `nvidia-smi` metadata, inputs, seeds, launch tuples, all candidate outcomes,
-all timing samples, and allocator peaks.
+all timing samples, and allocator peaks. Environment snapshots are captured
+once before any workload runs and once after all workloads complete; each
+snapshot records its own capture time and current free-memory state.
 
 Remote source provenance must agree across the Git checkout,
 `COLPALI_SOURCE_COMMIT`, and `.source_commit` whenever those sources are
