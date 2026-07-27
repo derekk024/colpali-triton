@@ -1370,6 +1370,8 @@ def run_tuning(
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False
+    started_at = _utc_now()
+    wall_started = perf_counter()
     environment_at_start = _environment(device, config)
 
     dtype_by_name = {item.name: item for item in config.dtypes}
@@ -1387,8 +1389,6 @@ def run_tuning(
     ).hexdigest()
     git_state = _git_state()
     source_commit = _source_commit_provenance(git_state)
-    started_at = _utc_now()
-    wall_started = perf_counter()
     results: List[Dict[str, object]] = []
 
     with torch.inference_mode():
