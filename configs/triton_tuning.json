@@ -1,0 +1,176 @@
+{
+  "schema_version": 1,
+  "tuning_id": "phase11-l4-triton-maxsim-v1",
+  "seed": 20250726,
+  "device": {
+    "type": "cuda",
+    "index": 0
+  },
+  "timing": {
+    "warmup_iterations": 10,
+    "measured_iterations": 25,
+    "trials": 5
+  },
+  "selection": {
+    "workload_latency_statistic": "pooled_p50_cuda_event_ms",
+    "aggregate_metric": "median_workload_relative_p50",
+    "tie_breakers": [
+      "aggregate_cuda_event_latency_ms",
+      "candidate_id"
+    ],
+    "require_candidate_pass_all_workloads": true
+  },
+  "dtypes": [
+    {
+      "name": "float16",
+      "absolute_tolerance": 0.05,
+      "relative_tolerance": 0.01
+    },
+    {
+      "name": "bfloat16",
+      "absolute_tolerance": 0.1,
+      "relative_tolerance": 0.02
+    }
+  ],
+  "cases": [
+    {
+      "name": "latency_q15_d1",
+      "query_batch_size": 1,
+      "document_batch_size": 1,
+      "query_tokens": 15,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 15,
+      "active_document_tokens": 1030
+    },
+    {
+      "name": "retrieval_q15_d32",
+      "query_batch_size": 1,
+      "document_batch_size": 32,
+      "query_tokens": 15,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 15,
+      "active_document_tokens": 1030
+    },
+    {
+      "name": "padded_q32_d64",
+      "query_batch_size": 1,
+      "document_batch_size": 64,
+      "query_tokens": 32,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 23,
+      "active_document_tokens": 977
+    },
+    {
+      "name": "long_q50_d32",
+      "query_batch_size": 1,
+      "document_batch_size": 32,
+      "query_tokens": 50,
+      "document_tokens": 1030,
+      "embedding_dimension": 128,
+      "active_query_tokens": 50,
+      "active_document_tokens": 1030
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "tq16_td32_w4_s1",
+      "block_query_tokens": 16,
+      "block_document_tokens": 32,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 1
+    },
+    {
+      "candidate_id": "tq16_td32_w4_s2",
+      "block_query_tokens": 16,
+      "block_document_tokens": 32,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    {
+      "candidate_id": "tq16_td64_w4_s1",
+      "block_query_tokens": 16,
+      "block_document_tokens": 64,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 1
+    },
+    {
+      "candidate_id": "tq16_td64_w4_s2",
+      "block_query_tokens": 16,
+      "block_document_tokens": 64,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    {
+      "candidate_id": "tq16_td64_w4_s3",
+      "block_query_tokens": 16,
+      "block_document_tokens": 64,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 3
+    },
+    {
+      "candidate_id": "tq16_td64_w8_s2",
+      "block_query_tokens": 16,
+      "block_document_tokens": 64,
+      "block_embedding_dimension": 128,
+      "num_warps": 8,
+      "num_stages": 2
+    },
+    {
+      "candidate_id": "tq16_td128_w4_s1",
+      "block_query_tokens": 16,
+      "block_document_tokens": 128,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 1
+    },
+    {
+      "candidate_id": "tq16_td128_w4_s2",
+      "block_query_tokens": 16,
+      "block_document_tokens": 128,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    {
+      "candidate_id": "tq32_td32_w4_s2",
+      "block_query_tokens": 32,
+      "block_document_tokens": 32,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    {
+      "candidate_id": "tq32_td64_w4_s1",
+      "block_query_tokens": 32,
+      "block_document_tokens": 64,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 1
+    },
+    {
+      "candidate_id": "tq32_td64_w4_s2",
+      "block_query_tokens": 32,
+      "block_document_tokens": 64,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    {
+      "candidate_id": "tq32_td64_w8_s2",
+      "block_query_tokens": 32,
+      "block_document_tokens": 64,
+      "block_embedding_dimension": 128,
+      "num_warps": 8,
+      "num_stages": 2
+    }
+  ],
+  "normalize_embeddings": true
+}
