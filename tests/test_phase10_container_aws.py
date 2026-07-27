@@ -328,6 +328,194 @@ def test_termination_default_is_offline_and_exact_id_is_required() -> None:
     assert "--confirm-instance-id must exactly match" in mismatch.stderr
 
 
+def test_wait_terminated_command_is_scoped_to_exact_target() -> None:
+    command = lifecycle.build_wait_terminated_command(
+        region="us-west-2",
+        instance_id="i-0123456789abcdef0",
+        profile="benchmark",
+    )
+
+    assert command == [
+        "aws",
+        "--profile",
+        "benchmark",
+        "ec2",
+        "wait",
+        "instance-terminated",
+        "--instance-ids",
+        "i-0123456789abcdef0",
+        "--region",
+        "us-west-2",
+    ]
+
+
+def test_termination_receipt_confirms_terminal_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    instance_id = "i-0123456789abcdef0"
+    config = lifecycle.load_environment_config()
+    receipt_path = tmp_path / "termination.json"
+    describe_calls = 0
+
+    def completed(
+        command: list[str], payload: dict | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(payload or {}),
+            stderr="",
+        )
+
+    def fake_run(
+        command: list[str], *, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal describe_calls
+        del check
+        if "describe-instances" in command:
+            describe_calls += 1
+            state = "running" if describe_calls == 1 else "terminated"
+            return completed(
+                command,
+                {
+                    "Reservations": [
+                        {
+                            "Instances": [
+                                {
+                                    "InstanceId": instance_id,
+                                    "State": {"Name": state},
+                                    "Tags": [
+                                        {"Key": key, "Value": value}
+                                        for key, value in config["tags"].items()
+                                    ],
+                                }
+                            ]
+                        }
+                    ]
+                },
+            )
+        if "terminate-instances" in command:
+            return completed(
+                command,
+                {
+                    "TerminatingInstances": [
+                        {"InstanceId": instance_id}
+                    ]
+                },
+            )
+        if "wait" in command:
+            return completed(command)
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: "/usr/bin/aws")
+    monkeypatch.setattr(lifecycle, "_run_command", fake_run)
+    monkeypatch.setattr(
+        lifecycle, "_validate_aws_dry_run", lambda command: None
+    )
+    args = type(
+        "Args",
+        (),
+        {
+            "region": "us-west-2",
+            "instance_id": instance_id,
+            "profile": None,
+            "execute": True,
+            "confirm_instance_id": instance_id,
+            "receipt": receipt_path,
+        },
+    )
+
+    assert lifecycle._handle_terminate(args, config) == 0
+
+    record = json.loads(receipt_path.read_text())
+    assert record["confirmed_terminated"] is True
+    assert record["post_termination_status"]["state"] == "terminated"
+    assert record["wait"]["returncode"] == 0
+    assert json.loads(capsys.readouterr().out)["confirmed_terminated"] is True
+
+
+def test_unconfirmed_termination_still_writes_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    instance_id = "i-0123456789abcdef0"
+    config = lifecycle.load_environment_config()
+    receipt_path = tmp_path / "termination.json"
+
+    def fake_run(
+        command: list[str], *, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
+        del check
+        if "describe-instances" in command:
+            payload = {
+                "Reservations": [
+                    {
+                        "Instances": [
+                            {
+                                "InstanceId": instance_id,
+                                "State": {"Name": "shutting-down"},
+                                "Tags": [
+                                    {"Key": key, "Value": value}
+                                    for key, value in config["tags"].items()
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            }
+            return subprocess.CompletedProcess(
+                command, 0, stdout=json.dumps(payload), stderr=""
+            )
+        if "terminate-instances" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(
+                    {
+                        "TerminatingInstances": [
+                            {"InstanceId": instance_id}
+                        ]
+                    }
+                ),
+                stderr="",
+            )
+        if "wait" in command:
+            return subprocess.CompletedProcess(
+                command, 255, stdout="", stderr="wait timed out"
+            )
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(lifecycle.shutil, "which", lambda name: "/usr/bin/aws")
+    monkeypatch.setattr(lifecycle, "_run_command", fake_run)
+    monkeypatch.setattr(
+        lifecycle, "_validate_aws_dry_run", lambda command: None
+    )
+    args = type(
+        "Args",
+        (),
+        {
+            "region": "us-west-2",
+            "instance_id": instance_id,
+            "profile": None,
+            "execute": True,
+            "confirm_instance_id": instance_id,
+            "receipt": receipt_path,
+        },
+    )
+
+    with pytest.raises(
+        lifecycle.LifecycleError, match="termination was not confirmed"
+    ):
+        lifecycle._handle_terminate(args, config)
+
+    record = json.loads(receipt_path.read_text())
+    assert record["confirmed_terminated"] is False
+    assert record["post_termination_status"]["state"] == "shutting-down"
+    assert record["wait"]["returncode"] == 255
+
+
 def test_receipt_write_is_non_overwriting(tmp_path: Path) -> None:
     receipt = tmp_path / "receipt.json"
     lifecycle._write_json_atomic(receipt, {"first": 1})

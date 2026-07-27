@@ -359,6 +359,24 @@ def build_terminate_command(
     ]
 
 
+def build_wait_terminated_command(
+    *,
+    region: str,
+    instance_id: str,
+    profile: str | None,
+) -> list[str]:
+    return [
+        *_aws_prefix(profile),
+        "ec2",
+        "wait",
+        "instance-terminated",
+        "--instance-ids",
+        instance_id,
+        "--region",
+        region,
+    ]
+
+
 def _run_command(
     command: Sequence[str],
     *,
@@ -794,6 +812,50 @@ def _handle_terminate(
         _run_command(planned_command),
         operation="terminate-instances",
     )
+    wait_command = build_wait_terminated_command(
+        region=region,
+        instance_id=instance_id,
+        profile=args.profile,
+    )
+    wait_result = _run_command(wait_command, check=False)
+    final_status_command = build_status_command(
+        region=region,
+        instance_id=instance_id,
+        profile=args.profile,
+    )
+    final_status_result = _run_command(
+        final_status_command,
+        check=False,
+    )
+    final_status_response: dict[str, Any] | None = None
+    final_state: str | None = None
+    final_status_error: str | None = None
+    if final_status_result.returncode == 0:
+        try:
+            final_status_response = _parse_json_output(
+                final_status_result,
+                operation="post-termination describe-instances",
+            )
+            final_instance = _instance_from_response(
+                final_status_response
+            )
+            if final_instance.get("InstanceId") != instance_id:
+                raise LifecycleError(
+                    "post-termination instance ID does not match target"
+                )
+            final_state = final_instance.get("State", {}).get("Name")
+        except LifecycleError as exc:
+            final_status_error = str(exc)
+    else:
+        final_status_error = (
+            final_status_result.stderr.strip()
+            or final_status_result.stdout.strip()
+            or "post-termination describe-instances failed"
+        )
+    confirmed_terminated = final_state == "terminated" or (
+        wait_result.returncode == 0
+        and final_status_response is None
+    )
     receipt = {
         "schema_version": 1,
         "operation": "terminate",
@@ -803,10 +865,28 @@ def _handle_terminate(
         "verified_tags": {
             key: actual_tags[key] for key in sorted(config["tags"])
         },
-        "response": response,
+        "termination_request_response": response,
+        "wait": {
+            "command": wait_command,
+            "returncode": wait_result.returncode,
+            "stdout": wait_result.stdout.strip(),
+            "stderr": wait_result.stderr.strip(),
+        },
+        "post_termination_status": {
+            "command": final_status_command,
+            "state": final_state,
+            "error": final_status_error,
+            "response": final_status_response,
+        },
+        "confirmed_terminated": confirmed_terminated,
     }
     _write_json_atomic(receipt_path, receipt)
     print(json.dumps(receipt, indent=2, sort_keys=True))
+    if not confirmed_terminated:
+        raise LifecycleError(
+            "AWS accepted the termination request, but termination was not "
+            f"confirmed; inspect receipt {receipt_path}"
+        )
     return 0
 
 
