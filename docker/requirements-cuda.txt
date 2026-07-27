@@ -1,0 +1,8 @@
+# The base image supplies torch==2.6.0+cu124 and triton==3.2.0. They are
+# asserted in Dockerfile.cuda rather than downloaded again.
+iniconfig==2.1.0
+numpy==1.26.4
+packaging==24.1
+pluggy==1.6.0
+Pygments==2.19.2
+pytest==8.4.2

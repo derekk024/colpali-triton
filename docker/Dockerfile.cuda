@@ -1,0 +1,50 @@
+# syntax=docker/dockerfile:1.7
+#
+# This manifest is linux/amd64-only. Keep the tag for readability and the
+# digest for immutable resolution.
+FROM --platform=linux/amd64 \
+    pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel@sha256:0cf3402e946b7c384ba943ee05c90b4c5a4a05227923921f2b0918c011cfaf56
+
+ARG SOURCE_COMMIT=unknown
+
+LABEL org.opencontainers.image.title="colpali-triton CUDA benchmark environment" \
+      org.opencontainers.image.source="local-worktree" \
+      org.opencontainers.image.revision="${SOURCE_COMMIT}" \
+      org.opencontainers.image.base.name="pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel" \
+      org.opencontainers.image.base.digest="sha256:0cf3402e946b7c384ba943ee05c90b4c5a4a05227923921f2b0918c011cfaf56"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    COLPALI_SOURCE_COMMIT="${SOURCE_COMMIT}"
+
+WORKDIR /workspace/colpali-triton
+
+COPY docker/requirements-cuda.txt /tmp/requirements-cuda.txt
+RUN python -m pip install --no-cache-dir --no-deps \
+        -r /tmp/requirements-cuda.txt \
+    && rm /tmp/requirements-cuda.txt
+
+COPY . .
+RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
+    && python - <<'PY'
+import platform
+
+import torch
+import triton
+
+assert platform.machine() == "x86_64", platform.machine()
+assert torch.__version__.split("+", 1)[0] == "2.6.0", torch.__version__
+assert torch.version.cuda == "12.4", torch.version.cuda
+assert triton.__version__ == "3.2.0", triton.__version__
+print(
+    {
+        "architecture": platform.machine(),
+        "torch": torch.__version__,
+        "cuda_build": torch.version.cuda,
+        "triton": triton.__version__,
+    }
+)
+PY
+
+CMD ["python", "-c", "import torch, triton; print({'torch': torch.__version__, 'cuda_available': torch.cuda.is_available(), 'triton': triton.__version__})"]

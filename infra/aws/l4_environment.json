@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "format": "colpali-triton-aws-l4-environment",
+  "platform": "linux/amd64",
+  "recommended_instance_type": "g6.xlarge",
+  "allowed_instance_types": {
+    "g6.xlarge": {
+      "vcpus": 4,
+      "memory_gib": 16,
+      "gpu": "NVIDIA L4",
+      "gpu_count": 1,
+      "aws_reported_gpu_memory_gib": 22
+    },
+    "g6.2xlarge": {
+      "vcpus": 8,
+      "memory_gib": 32,
+      "gpu": "NVIDIA L4",
+      "gpu_count": 1,
+      "aws_reported_gpu_memory_gib": 22
+    }
+  },
+  "ami": {
+    "ssm_parameter": "/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-22.04/latest/ami-id",
+    "architecture": "x86_64",
+    "owner_alias": "amazon",
+    "name_prefix": "Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)"
+  },
+  "root_volume": {
+    "default_size_gib": 100,
+    "device_name": "/dev/sda1",
+    "type": "gp3",
+    "encrypted": true,
+    "delete_on_termination": true
+  },
+  "container": {
+    "base_tag": "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel",
+    "base_manifest_digest": "sha256:0cf3402e946b7c384ba943ee05c90b4c5a4a05227923921f2b0918c011cfaf56",
+    "base_reference": "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel@sha256:0cf3402e946b7c384ba943ee05c90b4c5a4a05227923921f2b0918c011cfaf56",
+    "torch_version": "2.6.0",
+    "cuda_version": "12.4",
+    "triton_version": "3.2.0"
+  },
+  "bootstrap": {
+    "user_data_path": "infra/aws/user_data.sh",
+    "ready_marker": "/var/lib/colpali-triton/bootstrap.ready",
+    "environment_record": "/var/lib/colpali-triton/bootstrap-environment.json"
+  },
+  "tags": {
+    "Project": "colpali-triton",
+    "Phase": "10",
+    "ManagedBy": "infra-aws-l4-lifecycle"
+  },
+  "official_sources": [
+    "https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html",
+    "https://docs.aws.amazon.com/dlami/latest/devguide/find-dlami-id.html",
+    "https://docs.aws.amazon.com/cli/latest/reference/ec2/run-instances.html",
+    "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html",
+    "https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html",
+    "https://pytorch.org/get-started/previous-versions/",
+    "https://hub.docker.com/r/pytorch/pytorch/tags"
+  ]
+}
