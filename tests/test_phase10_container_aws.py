@@ -99,6 +99,7 @@ def test_dockerfile_uses_exact_amd64_base_and_asserts_stack() -> None:
     assert f'base.digest="{EXPECTED_BASE_DIGEST}"' in dockerfile
     assert 'torch.version.cuda == "12.4"' in dockerfile
     assert 'triton.__version__ == "3.2.0"' in dockerfile
+    assert 'shutil.which("ncu") or shutil.which("nsys")' in dockerfile
     assert "--no-build-isolation ." in dockerfile
     assert "COPY . ." in dockerfile
 

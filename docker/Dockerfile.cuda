@@ -29,6 +29,7 @@ COPY . .
 RUN python -m pip install --no-cache-dir --no-deps --no-build-isolation . \
     && python - <<'PY'
 import platform
+import shutil
 
 import torch
 import triton
@@ -37,12 +38,15 @@ assert platform.machine() == "x86_64", platform.machine()
 assert torch.__version__.split("+", 1)[0] == "2.6.0", torch.__version__
 assert torch.version.cuda == "12.4", torch.version.cuda
 assert triton.__version__ == "3.2.0", triton.__version__
+profiler = shutil.which("ncu") or shutil.which("nsys")
+assert profiler is not None, "the CUDA image must contain ncu or nsys"
 print(
     {
         "architecture": platform.machine(),
         "torch": torch.__version__,
         "cuda_build": torch.version.cuda,
         "triton": triton.__version__,
+        "profiler": profiler,
     }
 )
 PY
