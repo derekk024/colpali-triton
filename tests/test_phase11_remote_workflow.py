@@ -526,6 +526,8 @@ def test_offline_plan_states_every_remote_safety_boundary(
         "execution_terminates_or_stops_instance": False,
         "remote_results_overwritten": False,
         "local_results_overwritten": False,
+        "remote_job_survives_client_disconnect": True,
+        "same_run_id_is_resumable": True,
         "instance_left_running_after_completion": True,
     }
     assert any("zero-skip parity" in step for step in plan["steps"])
@@ -635,7 +637,319 @@ def test_existing_local_result_is_a_preflight_blocker(
 
     blockers = workflow._local_preflight(spec)
 
-    assert any("will not be overwritten" in item for item in blockers)
+    assert any(
+        "is not an exact verified reusable result" in item
+        for item in blockers
+    )
+
+
+def test_ssh_connections_have_bounded_connect_and_keepalive_options(
+    tmp_path: Path,
+) -> None:
+    options = workflow._ssh_options(_spec(tmp_path))
+
+    assert "ConnectTimeout=15" in options
+    assert "ConnectionAttempts=3" in options
+    assert "ServerAliveInterval=30" in options
+    assert "ServerAliveCountMax=3" in options
+
+
+def test_source_archive_uses_exact_commit_and_hashes_content(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(tuple(command))
+        output = kwargs["stdout"]
+        payload = b"committed source\n"
+        with tarfile.open(fileobj=output, mode="w") as archive:
+            member = tarfile.TarInfo("tracked.txt")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        return subprocess.CompletedProcess(command, 0, b"", b"")
+
+    monkeypatch.setattr(workflow.subprocess, "run", fake_run)
+    archive = workflow._prepare_source_archive(
+        spec,
+        tmp_path / "source.tar",
+    )
+    expected_content = hashlib.sha256()
+    expected_content.update(b"tracked.txt\0")
+    expected_content.update(str(len(b"committed source\n")).encode("ascii"))
+    expected_content.update(b"\0committed source\n\0")
+
+    assert commands == [
+        ("git", "archive", "--format=tar", spec.source_commit)
+    ]
+    assert "HEAD" not in commands[0]
+    assert archive.archive_sha256 == hashlib.sha256(
+        archive.path.read_bytes()
+    ).hexdigest()
+    assert archive.content_sha256 == expected_content.hexdigest()
+
+
+def test_remote_source_reuse_reverifies_hashes_and_read_only_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="b" * 64,
+        content_sha256="c" * 64,
+    )
+    commands = []
+
+    def fake_ssh(spec_value, command, *, capture_output=True):
+        del spec_value, capture_output
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "ready", "")
+
+    monkeypatch.setattr(workflow, "_run_ssh", fake_ssh)
+
+    assert workflow._remote_source_state(spec, archive) == "ready"
+    assert archive.archive_sha256 in commands[0]
+    assert archive.content_sha256 in commands[0]
+    assert ".source_archive_sha256" in commands[0]
+    assert ".source_content_sha256" in commands[0]
+    assert "-perm /222" in commands[0]
+    assert "python3 -c" in commands[0]
+
+
+def test_remote_source_tamper_is_rejected_instead_of_reused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="b" * 64,
+        content_sha256="c" * 64,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_run_ssh",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, 0, "invalid", ""
+        ),
+    )
+
+    assert workflow._remote_source_state(spec, archive) == "invalid"
+
+
+def test_detached_job_is_systemd_managed_and_overall_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    commands = []
+
+    def fake_ssh(spec_value, command, *, capture_output=True):
+        del spec_value, capture_output
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "started", "")
+
+    monkeypatch.setattr(workflow, "_run_ssh", fake_ssh)
+
+    workflow._start_remote_job(spec)
+
+    command = commands[0]
+    assert "sudo systemd-run" in command
+    assert f"--unit={spec.remote_unit_name}" in command
+    assert f"--uid={spec.user}" in command
+    assert (
+        f"RuntimeMaxSec={workflow.REMOTE_JOB_OUTER_TIMEOUT_SECONDS}s"
+        in command
+    )
+    assert (
+        f"/usr/bin/timeout --signal=TERM --kill-after=60s "
+        f"{workflow.REMOTE_JOB_TIMEOUT_SECONDS}s"
+    ) in command
+    assert "terminate" not in command
+
+
+def test_remote_wait_reconnects_after_transient_ssh_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="b" * 64,
+        content_sha256="c" * 64,
+    )
+    states: list[object] = [
+        workflow.WorkflowError("connection reset"),
+        "running",
+        "sealed",
+    ]
+
+    def fake_state(spec_value, archive_value):
+        del spec_value, archive_value
+        value = states.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(workflow, "_remote_run_state", fake_state)
+    monkeypatch.setattr(workflow.time, "sleep", lambda seconds: None)
+
+    assert workflow._wait_for_remote_run(spec, archive) == "sealed"
+    assert states == []
+
+
+@pytest.mark.parametrize("resume_state", ("sealed", "bundled"))
+def test_execute_reuses_sealed_or_bundled_run_without_restarting_job(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resume_state: str,
+) -> None:
+    spec = _spec(tmp_path)
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="b" * 64,
+        content_sha256="c" * 64,
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_run_ssh",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args, 0, "", ""
+        ),
+    )
+    monkeypatch.setattr(
+        workflow, "_prepare_source_archive", lambda *args: archive
+    )
+    monkeypatch.setattr(
+        workflow, "_remote_source_state", lambda *args: "ready"
+    )
+    monkeypatch.setattr(workflow, "_ensure_remote_control", lambda *args: None)
+    monkeypatch.setattr(
+        workflow, "_remote_run_state", lambda *args: resume_state
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_start_remote_job",
+        lambda *args: pytest.fail("sealed run must not restart"),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_wait_for_remote_run",
+        lambda *args: pytest.fail("sealed run must not be polled"),
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_seal_remote_bundle",
+        lambda *args: ("/remote/run.tar.gz", "/remote/run.tar.gz.sha256"),
+    )
+    receipt = {
+        "remote_workflow_status": "complete",
+        "remote_failure_reasons": [],
+    }
+    monkeypatch.setattr(
+        workflow, "_retrieve_bundle", lambda *args: receipt
+    )
+
+    result = workflow.execute(spec)
+
+    assert result["status"] == "complete"
+    assert result["remote_resume_state"] == resume_state
+    assert result["reused_verified_local_result"] is False
+
+
+def test_execute_reuses_already_verified_local_result_without_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    spec.local_result_directory.mkdir(parents=True)
+    receipt = {
+        "remote_workflow_status": "complete",
+        "remote_failure_reasons": [],
+    }
+    monkeypatch.setattr(
+        workflow,
+        "_prepare_source_archive",
+        lambda *args: workflow.SourceArchive(
+            path=tmp_path / "source.tar",
+            archive_sha256="b" * 64,
+            content_sha256="c" * 64,
+        ),
+    )
+    monkeypatch.setattr(
+        workflow, "_reuse_local_result", lambda *args: receipt
+    )
+    monkeypatch.setattr(
+        workflow,
+        "_run_ssh",
+        lambda *args, **kwargs: pytest.fail(
+            "verified local reuse must not invoke SSH"
+        ),
+    )
+
+    result = workflow.execute(spec)
+
+    assert result["status"] == "complete"
+    assert result["reused_verified_local_result"] is True
+
+
+def test_retrieval_receipt_retains_source_archive_and_content_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    archive = workflow.SourceArchive(
+        path=tmp_path / "source.tar",
+        archive_sha256="b" * 64,
+        content_sha256="c" * 64,
+    )
+    bundle_remote = "/remote/phase11-test.tar.gz"
+    bundle_sha_remote = f"{bundle_remote}.sha256"
+
+    def fake_run(command, *, capture_output=True):
+        del capture_output
+        destination = Path(command[-1])
+        if destination.name.endswith(".sha256"):
+            bundle = destination.with_suffix("")
+            digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+            destination.write_text(
+                f"{digest}  {Path(bundle_remote).name}\n"
+            )
+        else:
+            destination.write_bytes(b"verified bundle")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_extract(bundle, destination, run_id):
+        del bundle
+        root = destination / run_id
+        root.mkdir(parents=True)
+        return root
+
+    monkeypatch.setattr(workflow, "_run_local", fake_run)
+    monkeypatch.setattr(workflow, "_safe_extract", fake_extract)
+    monkeypatch.setattr(
+        workflow,
+        "_verify_artifact_manifest",
+        lambda *args, **kwargs: ("d" * 64, [], "complete", []),
+    )
+
+    receipt = workflow._retrieve_bundle(
+        spec,
+        bundle_remote,
+        bundle_sha_remote,
+        archive,
+    )
+
+    assert receipt["source_archive_sha256"] == "b" * 64
+    assert receipt["source_content_sha256"] == "c" * 64
+    assert receipt["remote_unit_name"] == spec.remote_unit_name
+    assert (
+        receipt["remote_job_timeout_seconds"]
+        == workflow.REMOTE_JOB_TIMEOUT_SECONDS
+    )
 
 
 def test_manifest_verification_detects_payload_tampering(
@@ -899,8 +1213,9 @@ def test_remote_job_has_bounded_complete_contract_and_no_termination() -> None:
     assert "benchmarks/tune_triton_maxsim.py --preflight" in script
     assert "--output /phase11-results/triton_tuning.json" in script
     assert (
-        '"${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \\\n'
-        "        python infra/aws/derive_phase11_winner.py"
+        "run_docker_capture_timed \\\n"
+        '        "derive_winner" \\\n'
+        '        "${DERIVE_TIMEOUT_SECONDS}"'
     ) in script
     assert "--config /phase11-results/maxsim_benchmark_tuned_config.json" in (
         script

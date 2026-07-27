@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from typing import Any, Sequence
 
 AWS_INFRA_DIRECTORY = Path(__file__).resolve().parent
@@ -39,6 +40,53 @@ SAFE_ABSOLUTE_REMOTE_PATH = re.compile(r"^/[A-Za-z0-9._/-]+$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_BUNDLE_UNCOMPRESSED_BYTES = 10 * 1024**3
+REMOTE_JOB_TIMEOUT_SECONDS = 4 * 60 * 60
+REMOTE_JOB_OUTER_TIMEOUT_SECONDS = REMOTE_JOB_TIMEOUT_SECONDS + 5 * 60
+REMOTE_POLL_TIMEOUT_SECONDS = REMOTE_JOB_OUTER_TIMEOUT_SECONDS + 10 * 60
+REMOTE_POLL_INTERVAL_SECONDS = 10
+REMOTE_RECONNECT_TIMEOUT_SECONDS = 15 * 60
+SOURCE_MARKER_NAMES = {
+    ".source_archive_sha256",
+    ".source_commit",
+    ".source_complete",
+    ".source_content_sha256",
+}
+SOURCE_CONTENT_HASH_SCRIPT = r"""
+from hashlib import sha256
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+expected = sys.argv[2]
+markers = {
+    ".source_archive_sha256",
+    ".source_commit",
+    ".source_complete",
+    ".source_content_sha256",
+}
+digest = sha256()
+paths = []
+for path in root.rglob("*"):
+    relative = path.relative_to(root).as_posix()
+    if relative in markers:
+        continue
+    if path.is_symlink() or not (path.is_file() or path.is_dir()):
+        raise SystemExit(3)
+    if path.is_file():
+        paths.append((relative, path))
+for relative, path in sorted(paths):
+    content = path.read_bytes()
+    digest.update(relative.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(str(len(content)).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(content)
+    digest.update(b"\0")
+actual = digest.hexdigest()
+if actual != expected:
+    raise SystemExit(4)
+print(actual)
+""".strip()
 MANDATORY_PHASE11_STEPS = (
     "command_contract",
     "container_build",
@@ -98,6 +146,24 @@ class RemoteSpec:
             / self.source_commit
             / self.run_id
         )
+
+    @property
+    def remote_control_directory(self) -> str:
+        return f"{self.remote_result_directory}.control"
+
+    @property
+    def remote_unit_name(self) -> str:
+        run_digest = hashlib.sha256(self.run_id.encode("utf-8")).hexdigest()
+        return (
+            f"colpali-phase11-{self.source_commit[:12]}-{run_digest[:16]}"
+        )
+
+
+@dataclass(frozen=True)
+class SourceArchive:
+    path: Path
+    archive_sha256: str
+    content_sha256: str
 
 
 def _utc_compact() -> str:
@@ -248,9 +314,13 @@ def _local_preflight(spec: RemoteSpec) -> list[str]:
                 f"required local executable is absent: {executable}"
             )
     if spec.local_result_directory.exists():
-        blockers.append(
-            "local result directory already exists and will not be overwritten"
-        )
+        try:
+            _reuse_local_result(spec)
+        except WorkflowError as exc:
+            blockers.append(
+                "local result directory exists but is not an exact verified "
+                f"reusable result: {exc}"
+            )
     return blockers
 
 
@@ -271,10 +341,16 @@ def build_plan(
         "container_image": spec.image_name,
         "remote_source_directory": spec.remote_source_directory,
         "remote_result_directory": spec.remote_result_directory,
+        "remote_control_directory": spec.remote_control_directory,
+        "remote_unit_name": spec.remote_unit_name,
+        "remote_job_timeout_seconds": REMOTE_JOB_TIMEOUT_SECONDS,
         "local_result_directory": str(spec.local_result_directory),
         "steps": [
             "verify the existing host bootstrap ready marker",
-            "deploy the clean committed HEAD without replacing prior source",
+            "archive the exact source commit and verify both archive and content",
+            "publish or reverify a read-only commit-specific remote source",
+            "start or resume a detached bounded host-side service",
+            "poll through reconnectable short SSH requests",
             "build the digest-pinned linux/amd64 CUDA image",
             "require cuda:0 to match the exact NVIDIA L4 hardware gate",
             "run the explicit CUDA test suite and zero-skip parity gate",
@@ -291,6 +367,8 @@ def build_plan(
             "execution_terminates_or_stops_instance": False,
             "remote_results_overwritten": False,
             "local_results_overwritten": False,
+            "remote_job_survives_client_disconnect": True,
+            "same_run_id_is_resumable": True,
             "instance_left_running_after_completion": True,
         },
     }
@@ -304,6 +382,14 @@ def _ssh_options(spec: RemoteSpec) -> list[str]:
         "IdentitiesOnly=yes",
         "-o",
         "StrictHostKeyChecking=accept-new",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "ConnectionAttempts=3",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
         "-i",
         str(spec.identity_file),
         "-p",
@@ -340,15 +426,133 @@ def _run_ssh(
     return completed
 
 
-def _remote_source_state(spec: RemoteSpec) -> str:
+def _prepare_source_archive(spec: RemoteSpec, output: Path) -> SourceArchive:
+    try:
+        with output.open("xb") as handle:
+            completed = subprocess.run(
+                (
+                    "git",
+                    "archive",
+                    "--format=tar",
+                    spec.source_commit,
+                ),
+                cwd=PROJECT_ROOT,
+                check=False,
+                stdout=handle,
+                stderr=subprocess.PIPE,
+            )
+    except OSError as exc:
+        raise WorkflowError(f"cannot create committed source archive: {exc}") from exc
+    if completed.returncode != 0:
+        raise WorkflowError(
+            "git archive failed: "
+            + completed.stderr.decode("utf-8", errors="replace").strip()
+        )
+    if not output.is_file() or output.stat().st_size == 0:
+        raise WorkflowError("git archive produced an empty source archive")
+
+    digest = hashlib.sha256()
+    names: set[str] = set()
+    total = 0
+    try:
+        with tarfile.open(output, "r:") as archive:
+            members = archive.getmembers()
+            for member in members:
+                path = PurePosixPath(member.name)
+                canonical = path.as_posix()
+                if (
+                    path.is_absolute()
+                    or ".." in path.parts
+                    or "." in path.parts
+                    or not path.parts
+                    or member.name.rstrip("/") != canonical
+                    or canonical in names
+                    or not (member.isfile() or member.isdir())
+                    or canonical in SOURCE_MARKER_NAMES
+                ):
+                    raise WorkflowError(
+                        "unsafe member in committed source archive: "
+                        f"{member.name!r}"
+                    )
+                names.add(canonical)
+                if not member.isfile():
+                    continue
+                total += member.size
+                if total > MAX_BUNDLE_UNCOMPRESSED_BYTES:
+                    raise WorkflowError(
+                        "committed source archive exceeds the 10 GiB "
+                        "safety limit"
+                    )
+                source = archive.extractfile(member)
+                if source is None:
+                    raise WorkflowError(
+                        f"cannot read source archive member: {member.name!r}"
+                    )
+                with source:
+                    content = source.read()
+                if len(content) != member.size:
+                    raise WorkflowError(
+                        f"truncated source archive member: {member.name!r}"
+                    )
+                digest.update(canonical.encode("utf-8"))
+                digest.update(b"\0")
+                digest.update(str(len(content)).encode("ascii"))
+                digest.update(b"\0")
+                digest.update(content)
+                digest.update(b"\0")
+    except tarfile.TarError as exc:
+        raise WorkflowError(f"cannot inspect committed source archive: {exc}") from exc
+    if not names:
+        raise WorkflowError("committed source archive has no members")
+    return SourceArchive(
+        path=output,
+        archive_sha256=_sha256_file(output),
+        content_sha256=digest.hexdigest(),
+    )
+
+
+def _source_content_check(
+    directory: str,
+    content_sha256: str,
+) -> str:
+    return " ".join(
+        (
+            "python3",
+            "-c",
+            shlex.quote(SOURCE_CONTENT_HASH_SCRIPT),
+            shlex.quote(directory),
+            shlex.quote(content_sha256),
+        )
+    )
+
+
+def _remote_source_state(
+    spec: RemoteSpec,
+    source_archive: SourceArchive,
+) -> str:
     directory = shlex.quote(spec.remote_source_directory)
     commit = shlex.quote(spec.source_commit)
+    archive_sha = shlex.quote(source_archive.archive_sha256)
+    content_sha = shlex.quote(source_archive.content_sha256)
+    content_check = _source_content_check(
+        spec.remote_source_directory,
+        source_archive.content_sha256,
+    )
     command = (
         "set -eu; "
         f"if test ! -e {directory}; then printf missing; "
-        f"elif test -f {directory}/.source_complete "
+        f"elif test -d {directory} "
+        f"&& test -f {directory}/.source_complete "
         f"&& test -f {directory}/.source_commit "
-        f"&& test \"$(cat {directory}/.source_commit)\" = {commit}; "
+        f"&& test -f {directory}/.source_archive_sha256 "
+        f"&& test -f {directory}/.source_content_sha256 "
+        f"&& test \"$(cat {directory}/.source_commit)\" = {commit} "
+        f"&& test \"$(cat {directory}/.source_archive_sha256)\" "
+        f"= {archive_sha} "
+        f"&& test \"$(cat {directory}/.source_content_sha256)\" "
+        f"= {content_sha} "
+        f"&& test -z \"$(find {directory} -perm /222 -print -quit)\" "
+        f"&& {content_check} >/dev/null 2>&1; "
         "then printf ready; else printf invalid; fi"
     )
     result = _run_ssh(spec, command).stdout.strip()
@@ -357,60 +561,82 @@ def _remote_source_state(spec: RemoteSpec) -> str:
     return result
 
 
-def _upload_archive(spec: RemoteSpec) -> None:
+def _upload_archive(
+    spec: RemoteSpec,
+    source_archive: SourceArchive,
+) -> None:
     directory = shlex.quote(spec.remote_source_directory)
-    parent = shlex.quote(str(PurePosixPath(
-        spec.remote_source_directory
-    ).parent))
+    parent_value = str(PurePosixPath(spec.remote_source_directory).parent)
+    parent = shlex.quote(parent_value)
     commit = shlex.quote(spec.source_commit)
+    archive_sha = shlex.quote(source_archive.archive_sha256)
+    content_sha = shlex.quote(source_archive.content_sha256)
+    stage_template = shlex.quote(
+        f"{parent_value}/.source-{spec.source_commit[:12]}.upload.XXXXXX"
+    )
+    stage_content_check = " ".join(
+        (
+            "python3",
+            "-c",
+            shlex.quote(SOURCE_CONTENT_HASH_SCRIPT),
+            '"${stage}"',
+            content_sha,
+        )
+    )
     remote_command = (
         "set -eu; umask 022; "
-        f"mkdir -p {parent}; test ! -e {directory}; mkdir {directory}; "
-        f"tar -xf - -C {directory}; "
-        f"printf '%s\\n' {commit} > {directory}/.source_commit; "
-        f"touch {directory}/.source_complete"
+        f"mkdir -p {parent}; test ! -e {directory}; "
+        f"stage=$(mktemp -d {stage_template}); "
+        "archive_path=\"${stage}.tar\"; "
+        "cleanup() { chmod -R u+w \"${stage}\" 2>/dev/null || true; "
+        "rm -rf -- \"${stage}\" \"${archive_path}\"; }; "
+        "trap cleanup EXIT HUP INT TERM; "
+        "cat > \"${archive_path}\"; "
+        f"printf '%s  %s\\n' {archive_sha} \"${{archive_path}}\" "
+        "| sha256sum --check -; "
+        "tar --no-same-owner -xf \"${archive_path}\" -C \"${stage}\"; "
+        f"{stage_content_check} >/dev/null; "
+        f"printf '%s\\n' {commit} > \"${{stage}}/.source_commit\"; "
+        f"printf '%s\\n' {archive_sha} "
+        "> \"${stage}/.source_archive_sha256\"; "
+        f"printf '%s\\n' {content_sha} "
+        "> \"${stage}/.source_content_sha256\"; "
+        "touch \"${stage}/.source_complete\"; "
+        "chmod -R a-w \"${stage}\"; chmod -R a+rX \"${stage}\"; "
+        f"{stage_content_check} >/dev/null; "
+        "test -z \"$(find \"${stage}\" -perm /222 -print -quit)\"; "
+        f"mv -T \"${{stage}}\" {directory}; "
+        "rm -f -- \"${archive_path}\"; trap - EXIT HUP INT TERM; "
+        "printf ready"
     )
     try:
-        archive = subprocess.Popen(
-            ("git", "archive", "--format=tar", "HEAD"),
-            cwd=PROJECT_ROOT,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert archive.stdout is not None
-        upload = subprocess.Popen(
-            _ssh_command(spec, remote_command),
-            cwd=PROJECT_ROOT,
-            stdin=archive.stdout,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        with source_archive.path.open("rb") as archive_stream:
+            upload = subprocess.run(
+                _ssh_command(spec, remote_command),
+                cwd=PROJECT_ROOT,
+                check=False,
+                stdin=archive_stream,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
     except OSError as exc:
         raise WorkflowError(
             f"cannot start committed-source upload: {exc}"
         ) from exc
-    archive.stdout.close()
-    upload_stdout, upload_stderr = upload.communicate()
-    assert archive.stderr is not None
-    archive_stderr = archive.stderr.read()
-    archive_returncode = archive.wait()
-    if archive_returncode != 0:
-        raise WorkflowError(
-            "git archive failed: "
-            + archive_stderr.decode("utf-8", errors="replace").strip()
-        )
     if upload.returncode != 0:
         raise WorkflowError(
             "remote source upload failed: "
-            + upload_stderr.decode("utf-8", errors="replace").strip()
+            + upload.stderr.decode("utf-8", errors="replace").strip()
         )
-    if upload_stdout.strip():
+    if upload.stdout.strip() != b"ready":
         raise WorkflowError("remote source upload returned unexpected output")
+    if _remote_source_state(spec, source_archive) != "ready":
+        raise WorkflowError("uploaded source failed immutable re-verification")
 
 
-def _run_remote_job(spec: RemoteSpec) -> None:
+def _remote_job_command(spec: RemoteSpec) -> str:
     source = shlex.quote(spec.remote_source_directory)
-    command = " ".join(
+    return " ".join(
         (
             f"{source}/infra/aws/run_phase11_job.sh",
             "--source-directory",
@@ -425,7 +651,227 @@ def _run_remote_job(spec: RemoteSpec) -> None:
             shlex.quote(spec.image_name),
         )
     )
-    _run_ssh(spec, f"set -eu; {command}", capture_output=False)
+
+
+def _control_contract_checks(
+    spec: RemoteSpec,
+    source_archive: SourceArchive,
+) -> str:
+    control = shlex.quote(spec.remote_control_directory)
+    expected = {
+        ".source_commit": spec.source_commit,
+        ".source_archive_sha256": source_archive.archive_sha256,
+        ".source_content_sha256": source_archive.content_sha256,
+        ".run_id": spec.run_id,
+        ".image_name": spec.image_name,
+        ".unit_name": spec.remote_unit_name,
+        ".timeout_seconds": str(REMOTE_JOB_TIMEOUT_SECONDS),
+    }
+    checks = [f"test -f {control}/.control_complete"]
+    for name, value in expected.items():
+        checks.extend(
+            (
+                f"test -f {control}/{name}",
+                (
+                    f"test \"$(cat {control}/{name})\" = "
+                    f"{shlex.quote(value)}"
+                ),
+            )
+        )
+    return " && ".join(checks)
+
+
+def _ensure_remote_control(
+    spec: RemoteSpec,
+    source_archive: SourceArchive,
+) -> None:
+    control_value = spec.remote_control_directory
+    control = shlex.quote(control_value)
+    parent_value = str(PurePosixPath(control_value).parent)
+    parent = shlex.quote(parent_value)
+    template = shlex.quote(
+        f"{parent_value}/.{spec.run_id}.control.XXXXXX"
+    )
+    values = {
+        ".source_commit": spec.source_commit,
+        ".source_archive_sha256": source_archive.archive_sha256,
+        ".source_content_sha256": source_archive.content_sha256,
+        ".run_id": spec.run_id,
+        ".image_name": spec.image_name,
+        ".unit_name": spec.remote_unit_name,
+        ".timeout_seconds": str(REMOTE_JOB_TIMEOUT_SECONDS),
+    }
+    writes = " ".join(
+        (
+            f"printf '%s\\n' {shlex.quote(value)} "
+            f"> \"${{stage}}/{name}\";"
+        )
+        for name, value in values.items()
+    )
+    marker_paths = " ".join(
+        f"\"${{stage}}/{name}\""
+        for name in (*values.keys(), ".control_complete")
+    )
+    checks = _control_contract_checks(spec, source_archive)
+    command = (
+        "set -eu; umask 022; "
+        f"mkdir -p {parent}; "
+        f"if test ! -e {control}; then "
+        f"stage=$(mktemp -d {template}); "
+        "cleanup() { rm -rf -- \"${stage}\"; }; "
+        "trap cleanup EXIT HUP INT TERM; "
+        f"{writes} "
+        "touch \"${stage}/.control_complete\"; "
+        f"chmod 0444 {marker_paths}; "
+        f"mv -T \"${{stage}}\" {control}; "
+        "trap - EXIT HUP INT TERM; "
+        "fi; "
+        f"if {checks}; then printf ready; else printf invalid; fi"
+    )
+    result = _run_ssh(spec, command).stdout.strip()
+    if result != "ready":
+        raise WorkflowError(
+            "remote run control path exists with a different contract"
+        )
+
+
+def _remote_run_state(
+    spec: RemoteSpec,
+    source_archive: SourceArchive,
+) -> str:
+    control = shlex.quote(spec.remote_control_directory)
+    result = shlex.quote(spec.remote_result_directory)
+    bundle = shlex.quote(f"{spec.remote_result_directory}.tar.gz")
+    unit = shlex.quote(spec.remote_unit_name)
+    checks = _control_contract_checks(spec, source_archive)
+    command = (
+        "set -eu; "
+        f"if test ! -e {control}; then "
+        f"if test -e {result} || test -e {bundle}; "
+        "then printf invalid; else printf missing; fi; "
+        f"elif ! ({checks}); then printf invalid; "
+        f"elif test -f {bundle}; then printf bundled; "
+        f"elif test -f {result}/SEALED.sha256; then printf sealed; "
+        f"elif systemctl is-active --quiet {unit}; then printf running; "
+        f"elif test -f {control}/job.done; then printf finished; "
+        f"elif test -e {result}; then printf failed; "
+        "else printf prepared; fi"
+    )
+    state = _run_ssh(spec, command).stdout.strip()
+    allowed = {
+        "missing",
+        "prepared",
+        "running",
+        "finished",
+        "sealed",
+        "bundled",
+        "failed",
+        "invalid",
+    }
+    if state not in allowed:
+        raise WorkflowError(f"unexpected remote run state: {state!r}")
+    return state
+
+
+def _start_remote_job(spec: RemoteSpec) -> None:
+    control = shlex.quote(spec.remote_control_directory)
+    result = shlex.quote(spec.remote_result_directory)
+    bundle = shlex.quote(f"{spec.remote_result_directory}.tar.gz")
+    unit = shlex.quote(spec.remote_unit_name)
+    log = shlex.quote(f"{spec.remote_control_directory}/job.log")
+    exit_tmp = shlex.quote(
+        f"{spec.remote_control_directory}/job.exit_code.tmp"
+    )
+    exit_path = shlex.quote(
+        f"{spec.remote_control_directory}/job.exit_code"
+    )
+    done = shlex.quote(f"{spec.remote_control_directory}/job.done")
+    job = _remote_job_command(spec)
+    wrapper = (
+        "set +e; "
+        f"/usr/bin/timeout --signal=TERM --kill-after=60s "
+        f"{REMOTE_JOB_TIMEOUT_SECONDS}s {job} > {log} 2>&1; "
+        "code=$?; "
+        f"printf '%s\\n' \"${{code}}\" > {exit_tmp}; "
+        f"mv -T {exit_tmp} {exit_path}; touch {done}; exit \"${{code}}\""
+    )
+    command = (
+        "set -eu; "
+        f"test -d {control}; "
+        f"if test -f {bundle} || test -f {result}/SEALED.sha256; "
+        "then printf complete; "
+        f"elif systemctl is-active --quiet {unit}; then printf running; "
+        f"elif test -f {done} || systemctl is-failed --quiet {unit}; "
+        "then printf failed; exit 4; "
+        "else "
+        "sudo systemd-run --quiet "
+        f"--unit={unit} --uid={shlex.quote(spec.user)} "
+        "--property=Type=exec "
+        f"--property=RuntimeMaxSec={REMOTE_JOB_OUTER_TIMEOUT_SECONDS}s "
+        "--property=TimeoutStopSec=60s --property=KillMode=mixed "
+        f"/bin/bash -c {shlex.quote(wrapper)}; "
+        "printf started; fi"
+    )
+    output = _run_ssh(spec, command).stdout.strip()
+    if output not in {"complete", "running", "started"}:
+        raise WorkflowError(
+            f"unexpected detached-job launch response: {output!r}"
+        )
+
+
+def _wait_for_remote_run(
+    spec: RemoteSpec,
+    source_archive: SourceArchive,
+) -> str:
+    deadline = time.monotonic() + REMOTE_POLL_TIMEOUT_SECONDS
+    last_connection_error: str | None = None
+    connection_error_started: float | None = None
+    while True:
+        try:
+            state = _remote_run_state(spec, source_archive)
+            last_connection_error = None
+            connection_error_started = None
+            if state in {"sealed", "bundled"}:
+                return state
+            if state in {"invalid", "failed", "finished"}:
+                raise WorkflowError(
+                    "detached Phase 11 job ended without a sealed result "
+                    f"(state={state})"
+                )
+            if state in {"missing", "prepared"}:
+                _ensure_remote_control(spec, source_archive)
+                _start_remote_job(spec)
+        except WorkflowError as exc:
+            message = str(exc)
+            if (
+                "ended without a sealed result" in message
+                or "different contract" in message
+            ):
+                raise
+            last_connection_error = message
+            now = time.monotonic()
+            if connection_error_started is None:
+                connection_error_started = now
+            elif (
+                now - connection_error_started
+                >= REMOTE_RECONNECT_TIMEOUT_SECONDS
+            ):
+                raise WorkflowError(
+                    "SSH remained unavailable for 15 minutes; the detached "
+                    "job was not stopped and the same run ID can be resumed"
+                ) from exc
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            detail = (
+                f"; last SSH error: {last_connection_error}"
+                if last_connection_error
+                else ""
+            )
+            raise WorkflowError(
+                "timed out waiting for the bounded detached Phase 11 job"
+                + detail
+            )
+        time.sleep(min(REMOTE_POLL_INTERVAL_SECONDS, remaining))
 
 
 def _seal_remote_bundle(spec: RemoteSpec) -> tuple[str, str]:
@@ -434,17 +880,30 @@ def _seal_remote_bundle(spec: RemoteSpec) -> tuple[str, str]:
     run_id = shlex.quote(spec.run_id)
     bundle = f"{spec.remote_result_directory}.tar.gz"
     bundle_sha = f"{bundle}.sha256"
+    bundle_quoted = shlex.quote(bundle)
+    bundle_sha_quoted = shlex.quote(bundle_sha)
     command = (
         "set -eu; "
+        f"if test -e {bundle_sha_quoted} && test ! -f {bundle_quoted}; "
+        "then echo 'bundle checksum exists without bundle' >&2; exit 3; fi; "
+        f"if test ! -f {bundle_quoted}; then "
         f"test -f {shlex.quote(str(result / 'SEALED.sha256'))}; "
         f"cd {shlex.quote(str(result))}; "
         "sha256sum --check SEALED.sha256; "
-        f"test ! -e {shlex.quote(bundle)}; "
-        f"test ! -e {shlex.quote(bundle_sha)}; "
+        f"bundle_tmp={bundle_quoted}.tmp.$$; "
         f"tar --sort=name --mtime='UTC 1970-01-01' "
         "--owner=0 --group=0 --numeric-owner "
-        f"-czf {shlex.quote(bundle)} -C {parent} {run_id}; "
-        f"sha256sum {shlex.quote(bundle)} > {shlex.quote(bundle_sha)}"
+        f"-czf \"${{bundle_tmp}}\" -C {parent} {run_id}; "
+        f"mv -T \"${{bundle_tmp}}\" {bundle_quoted}; fi; "
+        f"sha_tmp={bundle_sha_quoted}.tmp.$$; "
+        f"sha256sum {bundle_quoted} > \"${{sha_tmp}}\"; "
+        f"if test -f {bundle_sha_quoted}; then "
+        f"cmp -s \"${{sha_tmp}}\" {bundle_sha_quoted} "
+        "|| { echo 'existing bundle checksum disagrees' >&2; "
+        "rm -f -- \"${sha_tmp}\"; exit 4; }; "
+        "rm -f -- \"${sha_tmp}\"; "
+        f"else mv -T \"${{sha_tmp}}\" {bundle_sha_quoted}; fi; "
+        f"sha256sum --check {bundle_sha_quoted}"
     )
     _run_ssh(spec, command)
     return bundle, bundle_sha
@@ -510,6 +969,7 @@ def _verify_artifact_manifest(
     *,
     source_commit: str,
     run_id: str,
+    allow_local_retrieval: bool = False,
 ) -> tuple[str, list[dict[str, Any]], str, list[str]]:
     manifest_path = root / "artifact_manifest.json"
     sealed_path = root / "SEALED.sha256"
@@ -760,6 +1220,9 @@ def _verify_artifact_manifest(
         if path.is_file()
         for relative in (path.relative_to(root).as_posix(),)
         if relative not in {"artifact_manifest.json", "SEALED.sha256"}
+        and not (
+            allow_local_retrieval and relative.startswith("_retrieval/")
+        )
     }
     if actual != declared:
         raise WorkflowError(
@@ -783,6 +1246,7 @@ def _retrieve_bundle(
     spec: RemoteSpec,
     bundle_remote: str,
     bundle_sha_remote: str,
+    source_archive: SourceArchive,
 ) -> dict[str, Any]:
     target = spec.local_result_directory
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -804,6 +1268,14 @@ def _retrieve_bundle(
             "IdentitiesOnly=yes",
             "-o",
             "StrictHostKeyChecking=accept-new",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "ConnectionAttempts=3",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
             "-i",
             str(spec.identity_file),
             "-P",
@@ -858,6 +1330,8 @@ def _retrieve_bundle(
             "format": "colpali-triton-phase11-retrieval-receipt-v1",
             "retrieved_at": _utc_now(),
             "source_commit": spec.source_commit,
+            "source_archive_sha256": source_archive.archive_sha256,
+            "source_content_sha256": source_archive.content_sha256,
             "run_id": spec.run_id,
             "remote_host": spec.host,
             "remote_result_directory": spec.remote_result_directory,
@@ -866,6 +1340,8 @@ def _retrieve_bundle(
             "remote_artifact_file_count": len(files),
             "remote_workflow_status": workflow_status,
             "remote_failure_reasons": failure_reasons,
+            "remote_unit_name": spec.remote_unit_name,
+            "remote_job_timeout_seconds": REMOTE_JOB_TIMEOUT_SECONDS,
             "instance_was_stopped_or_terminated": False,
         }
         with (retrieval / "receipt.json").open(
@@ -884,22 +1360,136 @@ def _retrieve_bundle(
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def _reuse_local_result(
+    spec: RemoteSpec,
+    source_archive: SourceArchive | None = None,
+) -> dict[str, Any]:
+    root = spec.local_result_directory
+    retrieval = root / "_retrieval"
+    receipt_path = retrieval / "receipt.json"
+    bundle = retrieval / "remote_bundle.tar.gz"
+    bundle_sha_path = retrieval / "remote_bundle.tar.gz.sha256"
+    try:
+        receipt = json.loads(receipt_path.read_text())
+        expected_parts = bundle_sha_path.read_text().strip().split()
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError(
+            f"cannot read reusable local result receipt: {exc}"
+        ) from exc
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("format")
+        != "colpali-triton-phase11-retrieval-receipt-v1"
+        or receipt.get("source_commit") != spec.source_commit
+        or not isinstance(receipt.get("source_archive_sha256"), str)
+        or not HASH_PATTERN.fullmatch(receipt["source_archive_sha256"])
+        or not isinstance(receipt.get("source_content_sha256"), str)
+        or not HASH_PATTERN.fullmatch(receipt["source_content_sha256"])
+        or receipt.get("run_id") != spec.run_id
+        or receipt.get("remote_host") != spec.host
+        or receipt.get("remote_result_directory")
+        != spec.remote_result_directory
+        or receipt.get("remote_unit_name") != spec.remote_unit_name
+        or receipt.get("remote_job_timeout_seconds")
+        != REMOTE_JOB_TIMEOUT_SECONDS
+    ):
+        raise WorkflowError("local result receipt does not match this run")
+    if source_archive is not None and (
+        receipt["source_archive_sha256"] != source_archive.archive_sha256
+        or receipt["source_content_sha256"] != source_archive.content_sha256
+    ):
+        raise WorkflowError(
+            "local result source archive/content hashes do not match"
+        )
+    if not bundle.is_file() or len(expected_parts) != 2:
+        raise WorkflowError("local result lacks its verified remote bundle")
+    bundle_sha = _sha256_file(bundle)
+    if (
+        expected_parts[0] != bundle_sha
+        or PurePosixPath(expected_parts[1]).name
+        != f"{spec.run_id}.tar.gz"
+        or receipt.get("remote_bundle_sha256") != bundle_sha
+    ):
+        raise WorkflowError("local reusable bundle SHA-256 does not match")
+    manifest_sha, files, status, reasons = _verify_artifact_manifest(
+        root,
+        source_commit=spec.source_commit,
+        run_id=spec.run_id,
+        allow_local_retrieval=True,
+    )
+    if (
+        receipt.get("remote_artifact_manifest_sha256") != manifest_sha
+        or receipt.get("remote_artifact_file_count") != len(files)
+        or receipt.get("remote_workflow_status") != status
+        or receipt.get("remote_failure_reasons") != reasons
+    ):
+        raise WorkflowError("local result receipt differs from its artifacts")
+    return receipt
+
+
 def execute(spec: RemoteSpec) -> dict[str, Any]:
+    if spec.local_result_directory.exists():
+        with tempfile.TemporaryDirectory(
+            prefix=".phase11-source-archive-"
+        ) as archive_directory:
+            source_archive = _prepare_source_archive(
+                spec,
+                Path(archive_directory) / f"{spec.source_commit}.tar",
+            )
+            receipt = _reuse_local_result(spec, source_archive)
+        return {
+            "status": receipt["remote_workflow_status"],
+            "failure_reasons": receipt["remote_failure_reasons"],
+            "source_commit": spec.source_commit,
+            "run_id": spec.run_id,
+            "local_result_directory": str(spec.local_result_directory),
+            "receipt": receipt,
+            "reused_verified_local_result": True,
+            "instance_left_running": True,
+            "termination_was_not_invoked": True,
+        }
     _run_ssh(
         spec,
         "sudo test -f /var/lib/colpali-triton/bootstrap.ready",
     )
-    remote_state = _remote_source_state(spec)
-    if remote_state == "invalid":
-        raise WorkflowError(
-            "remote source path exists but lacks the exact complete commit "
-            "marker; no files were replaced"
+    with tempfile.TemporaryDirectory(
+        prefix=".phase11-source-archive-"
+    ) as archive_directory:
+        source_archive = _prepare_source_archive(
+            spec,
+            Path(archive_directory) / f"{spec.source_commit}.tar",
         )
-    if remote_state == "missing":
-        _upload_archive(spec)
-    _run_remote_job(spec)
-    bundle, bundle_sha = _seal_remote_bundle(spec)
-    receipt = _retrieve_bundle(spec, bundle, bundle_sha)
+        remote_source_state = _remote_source_state(spec, source_archive)
+        if remote_source_state == "invalid":
+            raise WorkflowError(
+                "remote source path failed exact archive/content "
+                "re-verification; no files were replaced"
+            )
+        if remote_source_state == "missing":
+            _upload_archive(spec, source_archive)
+        _ensure_remote_control(spec, source_archive)
+        run_state = _remote_run_state(spec, source_archive)
+        if run_state in {"invalid", "failed", "finished"}:
+            raise WorkflowError(
+                "existing Phase 11 run cannot be resumed safely "
+                f"(state={run_state})"
+            )
+        if run_state in {"missing", "prepared"}:
+            try:
+                _start_remote_job(spec)
+            except WorkflowError:
+                # The SSH response can be lost after systemd accepted the
+                # unit. Short reconnecting polls determine authoritative state.
+                pass
+        if run_state not in {"sealed", "bundled"}:
+            run_state = _wait_for_remote_run(spec, source_archive)
+        bundle, bundle_sha = _seal_remote_bundle(spec)
+    receipt = _retrieve_bundle(
+        spec,
+        bundle,
+        bundle_sha,
+        source_archive,
+    )
     return {
         "status": receipt["remote_workflow_status"],
         "failure_reasons": receipt["remote_failure_reasons"],
@@ -907,6 +1497,8 @@ def execute(spec: RemoteSpec) -> dict[str, Any]:
         "run_id": spec.run_id,
         "local_result_directory": str(spec.local_result_directory),
         "receipt": receipt,
+        "remote_resume_state": run_state,
+        "reused_verified_local_result": False,
         "instance_left_running": True,
         "termination_was_not_invoked": True,
     }

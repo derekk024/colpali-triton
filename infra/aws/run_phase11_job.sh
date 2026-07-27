@@ -7,6 +7,20 @@ SOURCE_COMMIT=""
 RUN_ID=""
 IMAGE_NAME=""
 
+BUILD_TIMEOUT_SECONDS=1200
+HARDWARE_TIMEOUT_SECONDS=120
+HOST_METADATA_TIMEOUT_SECONDS=120
+CUDA_TESTS_TIMEOUT_SECONDS=900
+CUDA_ASSERTION_TIMEOUT_SECONDS=120
+TUNING_PREFLIGHT_TIMEOUT_SECONDS=120
+TUNING_TIMEOUT_SECONDS=3600
+DERIVE_TIMEOUT_SECONDS=120
+BENCHMARK_TIMEOUT_SECONDS=1800
+RESULT_CONTRACT_TIMEOUT_SECONDS=120
+PROFILER_TIMEOUT_SECONDS=300
+PROFILE_STATUS_TIMEOUT_SECONDS=120
+TIMEOUT_KILL_AFTER_SECONDS=30
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -96,17 +110,54 @@ mkdir "${RESULT_DIRECTORY}"
 # diagnostics. Exit codes are captured explicitly and become manifest state.
 set +e
 
-run_logged() {
-    local LOG_PATH="$1"
-    shift
-    "$@" 2>&1 | tee "${LOG_PATH}"
+run_logged_timed() {
+    local TIMEOUT_SECONDS="$1"
+    local LOG_PATH="$2"
+    shift 2
+    timeout \
+        --signal=TERM \
+        "--kill-after=${TIMEOUT_KILL_AFTER_SECONDS}s" \
+        "${TIMEOUT_SECONDS}s" \
+        "$@" 2>&1 | tee "${LOG_PATH}"
     return "${PIPESTATUS[0]}"
+}
+
+run_capture_timed() {
+    local TIMEOUT_SECONDS="$1"
+    local STDOUT_PATH="$2"
+    local STDERR_PATH="$3"
+    shift 3
+    timeout \
+        --signal=TERM \
+        "--kill-after=${TIMEOUT_KILL_AFTER_SECONDS}s" \
+        "${TIMEOUT_SECONDS}s" \
+        "$@" > "${STDOUT_PATH}" 2> "${STDERR_PATH}"
 }
 
 skip_log() {
     local LOG_PATH="$1"
     local REASON="$2"
     printf 'SKIPPED: %s\n' "${REASON}" > "${LOG_PATH}"
+}
+
+cleanup_timed_container() {
+    local STEP_NAME="$1"
+    local EXIT_CODE="$2"
+    local CID_FILE="$3"
+    if (( EXIT_CODE == 124 || EXIT_CODE == 137 || EXIT_CODE == 143 )) \
+        && [[ -s "${CID_FILE}" ]]; then
+        local CONTAINER_ID
+        CONTAINER_ID="$(<"${CID_FILE}")"
+        if [[ "${CONTAINER_ID}" =~ ^[0-9a-f]{12,64}$ ]]; then
+            docker rm --force "${CONTAINER_ID}" \
+                > "${RESULT_DIRECTORY}/${STEP_NAME}_container_cleanup.log" \
+                2>&1
+        else
+            printf 'Invalid timed-out container ID: %s\n' "${CONTAINER_ID}" \
+                > "${RESULT_DIRECTORY}/${STEP_NAME}_container_cleanup.log"
+        fi
+    fi
+    rm -f "${CID_FILE}"
 }
 
 DOCKER_OPTIONS=(
@@ -127,6 +178,57 @@ PROFILER_DOCKER_OPTIONS=(
     --cap-add
     SYS_ADMIN
 )
+CID_DIRECTORY="${RESULT_DIRECTORY}/.docker-cids"
+mkdir "${CID_DIRECTORY}"
+
+run_docker_logged_timed() {
+    local STEP_NAME="$1"
+    local TIMEOUT_SECONDS="$2"
+    local LOG_PATH="$3"
+    local PROFILE_CAPABILITY="$4"
+    shift 4
+    local CID_FILE="${CID_DIRECTORY}/${STEP_NAME}.cid"
+    local OPTIONS=("${DOCKER_OPTIONS[@]}")
+    if [[ "${PROFILE_CAPABILITY}" == "profile" ]]; then
+        OPTIONS=("${PROFILER_DOCKER_OPTIONS[@]}")
+    fi
+    timeout \
+        --signal=TERM \
+        "--kill-after=${TIMEOUT_KILL_AFTER_SECONDS}s" \
+        "${TIMEOUT_SECONDS}s" \
+        "${OPTIONS[@]}" \
+        --cidfile "${CID_FILE}" \
+        "${IMAGE_NAME}" \
+        "$@" 2>&1 | tee "${LOG_PATH}"
+    local EXIT_CODE="${PIPESTATUS[0]}"
+    cleanup_timed_container "${STEP_NAME}" "${EXIT_CODE}" "${CID_FILE}"
+    return "${EXIT_CODE}"
+}
+
+run_docker_capture_timed() {
+    local STEP_NAME="$1"
+    local TIMEOUT_SECONDS="$2"
+    local STDOUT_PATH="$3"
+    local STDERR_PATH="$4"
+    local PROFILE_CAPABILITY="$5"
+    shift 5
+    local CID_FILE="${CID_DIRECTORY}/${STEP_NAME}.cid"
+    local OPTIONS=("${DOCKER_OPTIONS[@]}")
+    if [[ "${PROFILE_CAPABILITY}" == "profile" ]]; then
+        OPTIONS=("${PROFILER_DOCKER_OPTIONS[@]}")
+    fi
+    timeout \
+        --signal=TERM \
+        "--kill-after=${TIMEOUT_KILL_AFTER_SECONDS}s" \
+        "${TIMEOUT_SECONDS}s" \
+        "${OPTIONS[@]}" \
+        --cidfile "${CID_FILE}" \
+        "${IMAGE_NAME}" \
+        "$@" > "${STDOUT_PATH}" 2> "${STDERR_PATH}"
+    local EXIT_CODE=$?
+    cleanup_timed_container "${STEP_NAME}" "${EXIT_CODE}" "${CID_FILE}"
+    return "${EXIT_CODE}"
+}
 
 CUDA_TEST_FILES=(
     tests/test_maxsim.py
@@ -135,21 +237,49 @@ CUDA_TEST_FILES=(
     tests/test_benchmark_maxsim_script.py
     tests/test_tune_triton_maxsim_script.py
     tests/test_phase10_container_aws.py
+    tests/test_phase11_job_timeouts.py
     tests/test_phase11_remote_workflow.py
+    tests/test_phase11_tuning_preflight.py
 )
 
-export SOURCE_COMMIT RUN_ID IMAGE_NAME
+export \
+    SOURCE_COMMIT RUN_ID IMAGE_NAME \
+    BUILD_TIMEOUT_SECONDS HARDWARE_TIMEOUT_SECONDS \
+    HOST_METADATA_TIMEOUT_SECONDS CUDA_TESTS_TIMEOUT_SECONDS \
+    CUDA_ASSERTION_TIMEOUT_SECONDS TUNING_PREFLIGHT_TIMEOUT_SECONDS \
+    TUNING_TIMEOUT_SECONDS DERIVE_TIMEOUT_SECONDS BENCHMARK_TIMEOUT_SECONDS \
+    RESULT_CONTRACT_TIMEOUT_SECONDS PROFILER_TIMEOUT_SECONDS \
+    PROFILE_STATUS_TIMEOUT_SECONDS
 python3 - "${RESULT_DIRECTORY}/commands.json" <<'PY'
 import json
 import os
 from pathlib import Path
 import sys
 
+timeouts = {
+    "container_build": int(os.environ["BUILD_TIMEOUT_SECONDS"]),
+    "hardware_gate": int(os.environ["HARDWARE_TIMEOUT_SECONDS"]),
+    "host_metadata": int(os.environ["HOST_METADATA_TIMEOUT_SECONDS"]),
+    "cuda_tests": int(os.environ["CUDA_TESTS_TIMEOUT_SECONDS"]),
+    "cuda_assertion": int(os.environ["CUDA_ASSERTION_TIMEOUT_SECONDS"]),
+    "tuning_preflight": int(
+        os.environ["TUNING_PREFLIGHT_TIMEOUT_SECONDS"]
+    ),
+    "tuning": int(os.environ["TUNING_TIMEOUT_SECONDS"]),
+    "derive_winner": int(os.environ["DERIVE_TIMEOUT_SECONDS"]),
+    "benchmark": int(os.environ["BENCHMARK_TIMEOUT_SECONDS"]),
+    "result_contract": int(os.environ["RESULT_CONTRACT_TIMEOUT_SECONDS"]),
+    "profiling_ncu": int(os.environ["PROFILER_TIMEOUT_SECONDS"]),
+    "profiling_nsys": int(os.environ["PROFILER_TIMEOUT_SECONDS"]),
+    "profiling_status": int(os.environ["PROFILE_STATUS_TIMEOUT_SECONDS"]),
+}
+
 record = {
-    "format": "colpali-triton-phase11-command-contract-v2",
+    "format": "colpali-triton-phase11-command-contract-v3",
     "source_commit": os.environ["SOURCE_COMMIT"],
     "run_id": os.environ["RUN_ID"],
     "container_image": os.environ["IMAGE_NAME"],
+    "timeouts_seconds": timeouts,
     "remote_test_scope": "cuda-relevant-minimal-dependency",
     "local_full_suite_is_separate": True,
     "hardware_gate": {
@@ -165,7 +295,9 @@ record = {
         "tests/test_benchmark_maxsim_script.py",
         "tests/test_tune_triton_maxsim_script.py",
         "tests/test_phase10_container_aws.py",
+        "tests/test_phase11_job_timeouts.py",
         "tests/test_phase11_remote_workflow.py",
+        "tests/test_phase11_tuning_preflight.py",
     ],
     "gpu_parity_gate": {
         "required_cases": 5,
@@ -176,6 +308,13 @@ record = {
         "python benchmarks/tune_triton_maxsim.py "
         "--output /phase11-results/triton_tuning.json"
     ),
+    "tuning_preflight_assertion": {
+        "assertion": "infra/aws/assert_phase11_tuning_preflight.py",
+        "required_candidate_count": 12,
+        "required_dtype_count": 2,
+        "required_case_count": 4,
+        "required_status": "ready",
+    },
     "winner_derivation": (
         "infra/aws/derive_phase11_winner.py replaces only triton_launch "
         "in the canonical six-case benchmark config"
@@ -190,7 +329,7 @@ record = {
     ),
     "profiling": {
         "order": ["ncu", "nsys"],
-        "timeout_seconds_per_attempt": 300,
+        "timeout_seconds_per_attempt": timeouts["profiling_ncu"],
         "success_requires_nonempty_report": True,
         "launch_configuration": "exact tuning winner",
         "container_capabilities": ["SYS_ADMIN"],
@@ -204,17 +343,31 @@ with path.open("x", encoding="utf-8") as handle:
 PY
 COMMAND_CONTRACT_EXIT=$?
 
-(
-    cd "${SOURCE_DIRECTORY}" || exit 1
-    COLPALI_SOURCE_COMMIT="${SOURCE_COMMIT}" \
-        COLPALI_CUDA_IMAGE="${IMAGE_NAME}" \
-        ./docker/build_cuda.sh
-) 2>&1 | tee "${RESULT_DIRECTORY}/container_build.log"
-CONTAINER_BUILD_EXIT=${PIPESTATUS[0]}
+if (( COMMAND_CONTRACT_EXIT == 0 )); then
+    (
+        cd "${SOURCE_DIRECTORY}" || exit 1
+        run_logged_timed \
+            "${BUILD_TIMEOUT_SECONDS}" \
+            "${RESULT_DIRECTORY}/container_build.log" \
+            env \
+            COLPALI_SOURCE_COMMIT="${SOURCE_COMMIT}" \
+            COLPALI_CUDA_IMAGE="${IMAGE_NAME}" \
+            ./docker/build_cuda.sh
+    )
+    CONTAINER_BUILD_EXIT=$?
+else
+    CONTAINER_BUILD_EXIT=125
+    skip_log \
+        "${RESULT_DIRECTORY}/container_build.log" \
+        "command contract could not be recorded"
+fi
 
 if (( CONTAINER_BUILD_EXIT == 0 )); then
-    run_logged "${RESULT_DIRECTORY}/hardware_gate.log" \
-        "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
+    run_docker_logged_timed \
+        "hardware_gate" \
+        "${HARDWARE_TIMEOUT_SECONDS}" \
+        "${RESULT_DIRECTORY}/hardware_gate.log" \
+        "normal" \
         python infra/aws/assert_phase11_l4.py \
         --output /phase11-results/hardware_gate.json
     HARDWARE_GATE_EXIT=$?
@@ -223,41 +376,120 @@ else
     skip_log "${RESULT_DIRECTORY}/hardware_gate.log" "container build failed"
 fi
 
-python3 "${SOURCE_DIRECTORY}/infra/aws/phase11_host_metadata.py" \
+run_capture_timed \
+    "${HOST_METADATA_TIMEOUT_SECONDS}" \
+    "${RESULT_DIRECTORY}/host_metadata_stdout.log" \
+    "${RESULT_DIRECTORY}/host_metadata_capture.log" \
+    python3 "${SOURCE_DIRECTORY}/infra/aws/phase11_host_metadata.py" \
     --output "${RESULT_DIRECTORY}/host_metadata.json" \
     --source-commit "${SOURCE_COMMIT}" \
     --run-id "${RUN_ID}" \
-    --image-name "${IMAGE_NAME}" \
-    > "${RESULT_DIRECTORY}/host_metadata_capture.log" 2>&1
+    --image-name "${IMAGE_NAME}"
 HOST_METADATA_EXIT=$?
 
-if (( CONTAINER_BUILD_EXIT == 0 && HARDWARE_GATE_EXIT == 0 )); then
-    run_logged "${RESULT_DIRECTORY}/cuda_tests.log" \
-        "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
+if (( COMMAND_CONTRACT_EXIT == 0 \
+    && CONTAINER_BUILD_EXIT == 0 \
+    && HARDWARE_GATE_EXIT == 0 \
+    && HOST_METADATA_EXIT == 0 )); then
+    run_docker_logged_timed \
+        "cuda_tests" \
+        "${CUDA_TESTS_TIMEOUT_SECONDS}" \
+        "${RESULT_DIRECTORY}/cuda_tests.log" \
+        "normal" \
         python -m pytest \
         "${CUDA_TEST_FILES[@]}" \
         --junitxml /phase11-results/cuda_tests.xml
     CUDA_TESTS_EXIT=$?
 
-    python3 "${SOURCE_DIRECTORY}/infra/aws/assert_phase11_cuda_tests.py" \
+    run_capture_timed \
+        "${CUDA_ASSERTION_TIMEOUT_SECONDS}" \
+        "${RESULT_DIRECTORY}/cuda_test_assertion.stdout.log" \
+        "${RESULT_DIRECTORY}/cuda_test_assertion.log" \
+        python3 \
+        "${SOURCE_DIRECTORY}/infra/aws/assert_phase11_cuda_tests.py" \
         --junit "${RESULT_DIRECTORY}/cuda_tests.xml" \
-        --output "${RESULT_DIRECTORY}/cuda_test_assertion.json" \
-        > "${RESULT_DIRECTORY}/cuda_test_assertion.log" 2>&1
+        --output "${RESULT_DIRECTORY}/cuda_test_assertion.json"
     CUDA_ASSERTION_EXIT=$?
+else
+    CUDA_TESTS_EXIT=125
+    CUDA_ASSERTION_EXIT=125
+    if (( COMMAND_CONTRACT_EXIT != 0 )); then
+        WORK_SKIP_REASON="command contract could not be recorded"
+    elif (( CONTAINER_BUILD_EXIT != 0 )); then
+        WORK_SKIP_REASON="container build failed"
+    elif (( HARDWARE_GATE_EXIT != 0 )); then
+        WORK_SKIP_REASON="NVIDIA L4 hardware gate failed"
+    else
+        WORK_SKIP_REASON="host metadata capture failed"
+    fi
+    skip_log "${RESULT_DIRECTORY}/cuda_tests.log" "${WORK_SKIP_REASON}"
+    skip_log \
+        "${RESULT_DIRECTORY}/cuda_test_assertion.log" \
+        "${WORK_SKIP_REASON}"
+fi
 
-    "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
-        python benchmarks/tune_triton_maxsim.py --preflight \
-        > "${RESULT_DIRECTORY}/tuning_preflight.json" \
-        2> "${RESULT_DIRECTORY}/tuning_preflight.log"
-    TUNING_PREFLIGHT_EXIT=$?
+if (( CUDA_TESTS_EXIT == 0 && CUDA_ASSERTION_EXIT == 0 )); then
+    run_docker_capture_timed \
+        "tuning_preflight" \
+        "${TUNING_PREFLIGHT_TIMEOUT_SECONDS}" \
+        "${RESULT_DIRECTORY}/tuning_preflight.json" \
+        "${RESULT_DIRECTORY}/tuning_preflight.log" \
+        "normal" \
+        python benchmarks/tune_triton_maxsim.py --preflight
+    TUNING_PREFLIGHT_COMMAND_EXIT=$?
+    if (( TUNING_PREFLIGHT_COMMAND_EXIT == 0 )); then
+        run_capture_timed \
+            "${TUNING_PREFLIGHT_TIMEOUT_SECONDS}" \
+            "${RESULT_DIRECTORY}/tuning_preflight_assertion.stdout.log" \
+            "${RESULT_DIRECTORY}/tuning_preflight_assertion.log" \
+            python3 \
+            "${SOURCE_DIRECTORY}/infra/aws/assert_phase11_tuning_preflight.py" \
+            --preflight "${RESULT_DIRECTORY}/tuning_preflight.json" \
+            --config "${SOURCE_DIRECTORY}/configs/triton_tuning.json" \
+            --output \
+                "${RESULT_DIRECTORY}/tuning_preflight_assertion.json"
+        TUNING_PREFLIGHT_EXIT=$?
+    else
+        TUNING_PREFLIGHT_EXIT="${TUNING_PREFLIGHT_COMMAND_EXIT}"
+        skip_log \
+            "${RESULT_DIRECTORY}/tuning_preflight_assertion.log" \
+            "containerized tuning preflight failed"
+    fi
+else
+    TUNING_PREFLIGHT_EXIT=125
+    skip_log \
+        "${RESULT_DIRECTORY}/tuning_preflight.log" \
+        "CUDA tests or their assertion failed"
+    skip_log \
+        "${RESULT_DIRECTORY}/tuning_preflight_assertion.log" \
+        "CUDA tests or their assertion failed"
+fi
 
-    run_logged "${RESULT_DIRECTORY}/triton_tuning.log" \
-        "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
+if (( CUDA_TESTS_EXIT == 0 \
+    && CUDA_ASSERTION_EXIT == 0 \
+    && TUNING_PREFLIGHT_EXIT == 0 )); then
+    run_docker_logged_timed \
+        "tuning" \
+        "${TUNING_TIMEOUT_SECONDS}" \
+        "${RESULT_DIRECTORY}/triton_tuning.log" \
+        "normal" \
         python benchmarks/tune_triton_maxsim.py \
         --output /phase11-results/triton_tuning.json
     TUNING_EXIT=$?
+else
+    TUNING_EXIT=125
+    skip_log \
+        "${RESULT_DIRECTORY}/triton_tuning.log" \
+        "CUDA test, assertion, or tuning preflight gate failed"
+fi
 
-    "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
+if (( TUNING_EXIT == 0 )); then
+    run_docker_capture_timed \
+        "derive_winner" \
+        "${DERIVE_TIMEOUT_SECONDS}" \
+        "${RESULT_DIRECTORY}/tuning_winner_derivation.stdout.log" \
+        "${RESULT_DIRECTORY}/tuning_winner_derivation.log" \
+        "normal" \
         python infra/aws/derive_phase11_winner.py \
         --tuning-result /phase11-results/triton_tuning.json \
         --base-benchmark-config \
@@ -265,50 +497,49 @@ if (( CONTAINER_BUILD_EXIT == 0 && HARDWARE_GATE_EXIT == 0 )); then
         --output-config \
             /phase11-results/maxsim_benchmark_tuned_config.json \
         --winner-record /phase11-results/tuning_winner.json \
-        --source-commit "${SOURCE_COMMIT}" \
-        > "${RESULT_DIRECTORY}/tuning_winner_derivation.log" 2>&1
+        --source-commit "${SOURCE_COMMIT}"
     DERIVE_WINNER_EXIT=$?
-
-    if (( DERIVE_WINNER_EXIT == 0 )); then
-        run_logged "${RESULT_DIRECTORY}/maxsim_cuda_benchmark.log" \
-            "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
-            python benchmarks/benchmark_maxsim.py \
-            --config /phase11-results/maxsim_benchmark_tuned_config.json \
-            --output /phase11-results/maxsim_cuda_benchmark.json
-        BENCHMARK_EXIT=$?
-    else
-        BENCHMARK_EXIT=125
-        skip_log \
-            "${RESULT_DIRECTORY}/maxsim_cuda_benchmark.log" \
-            "tuning winner could not be derived"
-    fi
 else
-    CUDA_TESTS_EXIT=125
-    CUDA_ASSERTION_EXIT=125
-    TUNING_PREFLIGHT_EXIT=125
-    TUNING_EXIT=125
     DERIVE_WINNER_EXIT=125
-    BENCHMARK_EXIT=125
-    if (( CONTAINER_BUILD_EXIT != 0 )); then
-        WORK_SKIP_REASON="container build failed"
-    else
-        WORK_SKIP_REASON="NVIDIA L4 hardware gate failed"
-    fi
-    skip_log "${RESULT_DIRECTORY}/cuda_tests.log" "${WORK_SKIP_REASON}"
-    skip_log \
-        "${RESULT_DIRECTORY}/cuda_test_assertion.log" \
-        "${WORK_SKIP_REASON}"
-    skip_log \
-        "${RESULT_DIRECTORY}/tuning_preflight.log" \
-        "${WORK_SKIP_REASON}"
-    skip_log "${RESULT_DIRECTORY}/triton_tuning.log" "${WORK_SKIP_REASON}"
     skip_log \
         "${RESULT_DIRECTORY}/tuning_winner_derivation.log" \
-        "${WORK_SKIP_REASON}"
+        "tuning failed"
+fi
+
+if (( COMMAND_CONTRACT_EXIT == 0 \
+    && CONTAINER_BUILD_EXIT == 0 \
+    && HARDWARE_GATE_EXIT == 0 \
+    && HOST_METADATA_EXIT == 0 \
+    && CUDA_TESTS_EXIT == 0 \
+    && CUDA_ASSERTION_EXIT == 0 \
+    && TUNING_PREFLIGHT_EXIT == 0 \
+    && TUNING_EXIT == 0 \
+    && DERIVE_WINNER_EXIT == 0 )); then
+    run_docker_logged_timed \
+        "benchmark" \
+        "${BENCHMARK_TIMEOUT_SECONDS}" \
+        "${RESULT_DIRECTORY}/maxsim_cuda_benchmark.log" \
+        "normal" \
+        python benchmarks/benchmark_maxsim.py \
+        --config /phase11-results/maxsim_benchmark_tuned_config.json \
+        --output /phase11-results/maxsim_cuda_benchmark.json
+    BENCHMARK_EXIT=$?
+else
+    BENCHMARK_EXIT=125
     skip_log \
         "${RESULT_DIRECTORY}/maxsim_cuda_benchmark.log" \
-        "${WORK_SKIP_REASON}"
+        "one or more prerequisite gates failed"
 fi
+
+run_capture_timed \
+    "${RESULT_CONTRACT_TIMEOUT_SECONDS}" \
+    "${RESULT_DIRECTORY}/result_contract_validation.stdout.log" \
+    "${RESULT_DIRECTORY}/result_contract_validation.log" \
+    python3 "${SOURCE_DIRECTORY}/infra/aws/phase11_result_contract.py" \
+    --result-directory "${RESULT_DIRECTORY}" \
+    --source-commit "${SOURCE_COMMIT}" \
+    --output "${RESULT_DIRECTORY}/result_contract_validation.json"
+RESULT_CONTRACT_EXIT=$?
 
 NCU_ATTEMPTED=0
 NCU_EXIT=-1
@@ -320,12 +551,13 @@ NSYS_REPORT=""
 NSYS_METADATA=""
 PROFILE_SUCCEEDED=0
 
-if (( DERIVE_WINNER_EXIT == 0 )) \
-    && "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
-        sh -c 'command -v ncu >/dev/null 2>&1'; then
+if (( RESULT_CONTRACT_EXIT == 0 )); then
     NCU_ATTEMPTED=1
+    NCU_CID_FILE="${CID_DIRECTORY}/profiling_ncu.cid"
     timeout --signal=TERM --kill-after=30s 300s \
-        "${PROFILER_DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
+        "${PROFILER_DOCKER_OPTIONS[@]}" \
+        --cidfile "${NCU_CID_FILE}" \
+        "${IMAGE_NAME}" \
         ncu \
         --target-processes application-only \
         --set basic \
@@ -337,6 +569,8 @@ if (( DERIVE_WINNER_EXIT == 0 )) \
         --metadata-output /phase11-results/profile_probe_ncu.json \
         > "${RESULT_DIRECTORY}/profiling_ncu.log" 2>&1
     NCU_EXIT=$?
+    cleanup_timed_container \
+        "profiling_ncu" "${NCU_EXIT}" "${NCU_CID_FILE}"
     if [[ -s "${RESULT_DIRECTORY}/maxsim_profile.ncu-rep" ]]; then
         NCU_REPORT="maxsim_profile.ncu-rep"
     fi
@@ -347,14 +581,19 @@ if (( DERIVE_WINNER_EXIT == 0 )) \
         && [[ -n "${NCU_REPORT}" && -n "${NCU_METADATA}" ]]; then
         PROFILE_SUCCEEDED=1
     fi
+else
+    skip_log \
+        "${RESULT_DIRECTORY}/profiling_ncu.log" \
+        "interim result contract did not pass"
 fi
 
-if (( PROFILE_SUCCEEDED == 0 && DERIVE_WINNER_EXIT == 0 )) \
-    && "${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
-        sh -c 'command -v nsys >/dev/null 2>&1'; then
+if (( PROFILE_SUCCEEDED == 0 && RESULT_CONTRACT_EXIT == 0 )); then
     NSYS_ATTEMPTED=1
+    NSYS_CID_FILE="${CID_DIRECTORY}/profiling_nsys.cid"
     timeout --signal=TERM --kill-after=30s 300s \
-        "${PROFILER_DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \
+        "${PROFILER_DOCKER_OPTIONS[@]}" \
+        --cidfile "${NSYS_CID_FILE}" \
+        "${IMAGE_NAME}" \
         nsys profile \
         --force-overwrite=false \
         --sample=none \
@@ -365,6 +604,8 @@ if (( PROFILE_SUCCEEDED == 0 && DERIVE_WINNER_EXIT == 0 )) \
         --metadata-output /phase11-results/profile_probe_nsys.json \
         > "${RESULT_DIRECTORY}/profiling_nsys.log" 2>&1
     NSYS_EXIT=$?
+    cleanup_timed_container \
+        "profiling_nsys" "${NSYS_EXIT}" "${NSYS_CID_FILE}"
     if [[ -s "${RESULT_DIRECTORY}/maxsim_profile.nsys-rep" ]]; then
         NSYS_REPORT="maxsim_profile.nsys-rep"
     fi
@@ -375,9 +616,21 @@ if (( PROFILE_SUCCEEDED == 0 && DERIVE_WINNER_EXIT == 0 )) \
         && [[ -n "${NSYS_REPORT}" && -n "${NSYS_METADATA}" ]]; then
         PROFILE_SUCCEEDED=1
     fi
+elif (( RESULT_CONTRACT_EXIT != 0 )); then
+    skip_log \
+        "${RESULT_DIRECTORY}/profiling_nsys.log" \
+        "interim result contract did not pass"
+else
+    skip_log \
+        "${RESULT_DIRECTORY}/profiling_nsys.log" \
+        "ncu profiling already succeeded"
 fi
 
-python3 "${SOURCE_DIRECTORY}/infra/aws/phase11_profile_status.py" \
+run_capture_timed \
+    "${PROFILE_STATUS_TIMEOUT_SECONDS}" \
+    "${RESULT_DIRECTORY}/profiling_status.stdout.log" \
+    "${RESULT_DIRECTORY}/profiling_status_capture.log" \
+    python3 "${SOURCE_DIRECTORY}/infra/aws/phase11_profile_status.py" \
     --result-directory "${RESULT_DIRECTORY}" \
     --output "${RESULT_DIRECTORY}/profiling_status.json" \
     --winner-record "${RESULT_DIRECTORY}/tuning_winner.json" \
@@ -391,19 +644,52 @@ python3 "${SOURCE_DIRECTORY}/infra/aws/phase11_profile_status.py" \
     --nsys-metadata "${NSYS_METADATA}"
 PROFILING_STATUS_EXIT=$?
 
-python3 "${SOURCE_DIRECTORY}/infra/aws/phase11_result_contract.py" \
-    --result-directory "${RESULT_DIRECTORY}" \
-    --source-commit "${SOURCE_COMMIT}" \
-    --output "${RESULT_DIRECTORY}/result_contract_validation.json" \
-    > "${RESULT_DIRECTORY}/result_contract_validation.log" 2>&1
-RESULT_CONTRACT_EXIT=$?
+if (( PROFILING_STATUS_EXIT != 0 )) \
+    || [[ ! -s "${RESULT_DIRECTORY}/profiling_status.json" ]]; then
+    rm -f "${RESULT_DIRECTORY}/profiling_status.json"
+    if (( NCU_ATTEMPTED == 1 )); then
+        NCU_ATTEMPTED_JSON=true
+        NCU_EXIT_JSON="${NCU_EXIT}"
+    else
+        NCU_ATTEMPTED_JSON=false
+        NCU_EXIT_JSON=null
+    fi
+    if (( NSYS_ATTEMPTED == 1 )); then
+        NSYS_ATTEMPTED_JSON=true
+        NSYS_EXIT_JSON="${NSYS_EXIT}"
+    else
+        NSYS_ATTEMPTED_JSON=false
+        NSYS_EXIT_JSON=null
+    fi
+    printf '%s\n' \
+        '{' \
+        '  "format": "colpali-triton-phase11-profiling-status-v1",' \
+        '  "succeeded": false,' \
+        '  "profiler": null,' \
+        '  "report": null,' \
+        '  "metadata": null,' \
+        '  "winner_record": null,' \
+        '  "winner_record_sha256": null,' \
+        '  "winner_record_error": "profile status helper failed",' \
+        '  "timeout_seconds_per_attempt": 300,' \
+        '  "container_capabilities": ["SYS_ADMIN"],' \
+        '  "privileged_container": false,' \
+        '  "attempts": [' \
+        "    {\"profiler\": \"ncu\", \"attempted\": ${NCU_ATTEMPTED_JSON}, \"exit_code\": ${NCU_EXIT_JSON}, \"report\": null, \"report_valid\": false, \"metadata\": null, \"metadata_matches_winner\": false, \"succeeded\": false}," \
+        "    {\"profiler\": \"nsys\", \"attempted\": ${NSYS_ATTEMPTED_JSON}, \"exit_code\": ${NSYS_EXIT_JSON}, \"report\": null, \"report_valid\": false, \"metadata\": null, \"metadata_matches_winner\": false, \"succeeded\": false}" \
+        '  ]' \
+        '}' \
+        > "${RESULT_DIRECTORY}/profiling_status.json"
+fi
+
+rmdir "${CID_DIRECTORY}"
 
 export \
     COMMAND_CONTRACT_EXIT CONTAINER_BUILD_EXIT HARDWARE_GATE_EXIT \
     HOST_METADATA_EXIT \
     CUDA_TESTS_EXIT CUDA_ASSERTION_EXIT TUNING_PREFLIGHT_EXIT \
     TUNING_EXIT DERIVE_WINNER_EXIT BENCHMARK_EXIT PROFILING_STATUS_EXIT \
-    RESULT_CONTRACT_EXIT
+    RESULT_CONTRACT_EXIT NCU_ATTEMPTED NCU_EXIT NSYS_ATTEMPTED NSYS_EXIT
 python3 - "${RESULT_DIRECTORY}/step_status.json" <<'PY'
 import json
 import os
@@ -424,6 +710,23 @@ names = (
     "PROFILING_STATUS",
     "RESULT_CONTRACT",
 )
+timeouts = {
+    "container_build": int(os.environ["BUILD_TIMEOUT_SECONDS"]),
+    "hardware_gate": int(os.environ["HARDWARE_TIMEOUT_SECONDS"]),
+    "host_metadata": int(os.environ["HOST_METADATA_TIMEOUT_SECONDS"]),
+    "cuda_tests": int(os.environ["CUDA_TESTS_TIMEOUT_SECONDS"]),
+    "cuda_assertion": int(os.environ["CUDA_ASSERTION_TIMEOUT_SECONDS"]),
+    "tuning_preflight": int(
+        os.environ["TUNING_PREFLIGHT_TIMEOUT_SECONDS"]
+    ),
+    "tuning": int(os.environ["TUNING_TIMEOUT_SECONDS"]),
+    "derive_winner": int(os.environ["DERIVE_TIMEOUT_SECONDS"]),
+    "benchmark": int(os.environ["BENCHMARK_TIMEOUT_SECONDS"]),
+    "result_contract": int(os.environ["RESULT_CONTRACT_TIMEOUT_SECONDS"]),
+    "profiling_ncu": int(os.environ["PROFILER_TIMEOUT_SECONDS"]),
+    "profiling_nsys": int(os.environ["PROFILER_TIMEOUT_SECONDS"]),
+    "profiling_status": int(os.environ["PROFILE_STATUS_TIMEOUT_SECONDS"]),
+}
 steps = {
     name.lower(): {
         "exit_code": int(os.environ[f"{name}_EXIT"]),
@@ -437,6 +740,31 @@ with path.open("x", encoding="utf-8") as handle:
         {
             "format": "colpali-triton-phase11-step-status-v1",
             "steps": steps,
+            "timeouts_seconds": timeouts,
+            "profiling_attempts": {
+                profiler: {
+                    "attempted": int(
+                        os.environ[f"{profiler.upper()}_ATTEMPTED"]
+                    )
+                    == 1,
+                    "exit_code": (
+                        int(os.environ[f"{profiler.upper()}_EXIT"])
+                        if int(
+                            os.environ[
+                                f"{profiler.upper()}_ATTEMPTED"
+                            ]
+                        )
+                        == 1
+                        else None
+                    ),
+                    "timeout_seconds": timeouts[f"profiling_{profiler}"],
+                    "timed_out": int(
+                        os.environ[f"{profiler.upper()}_EXIT"]
+                    )
+                    in {124, 137, 143},
+                }
+                for profiler in ("ncu", "nsys")
+            },
         },
         handle,
         indent=2,
