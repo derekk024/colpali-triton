@@ -39,6 +39,25 @@ SAFE_ABSOLUTE_REMOTE_PATH = re.compile(r"^/[A-Za-z0-9._/-]+$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_BUNDLE_UNCOMPRESSED_BYTES = 10 * 1024**3
+MANDATORY_PHASE11_STEPS = (
+    "command_contract",
+    "container_build",
+    "hardware_gate",
+    "host_metadata",
+    "cuda_tests",
+    "cuda_assertion",
+    "tuning_preflight",
+    "tuning",
+    "derive_winner",
+    "benchmark",
+    "profiling_status",
+    "result_contract",
+)
+REQUIRED_CUDA_COUNTS = {
+    "test_cuda_kernel_matches_vectorized_reference": 3,
+    "test_cuda_kernel_handles_noncontiguous_inputs_and_empty_masks": 1,
+    "test_cuda_kernel_propagates_active_nan_across_document_tiles": 1,
+}
 
 
 class WorkflowError(RuntimeError):
@@ -579,13 +598,30 @@ def _verify_artifact_manifest(
         and winner_matches_metadata
     )
     steps = manifest.get("steps")
-    if not isinstance(steps, dict) or not steps:
+    try:
+        step_status = json.loads((root / "step_status.json").read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError(
+            f"cannot read mandatory-step artifact: {exc}"
+        ) from exc
+    stored_steps = (
+        step_status.get("steps")
+        if isinstance(step_status, dict)
+        and step_status.get("format")
+        == "colpali-triton-phase11-step-status-v1"
+        else None
+    )
+    if (
+        not isinstance(steps, dict)
+        or set(steps) != set(MANDATORY_PHASE11_STEPS)
+        or stored_steps != steps
+    ):
         raise WorkflowError("remote mandatory-step status is invalid")
     failed_steps = []
     for name, record in steps.items():
         if (
-            not isinstance(name, str)
-            or not isinstance(record, dict)
+            not isinstance(record, dict)
+            or set(record) != {"exit_code", "succeeded"}
             or not isinstance(record.get("exit_code"), int)
             or isinstance(record.get("exit_code"), bool)
             or not isinstance(record.get("succeeded"), bool)
@@ -644,15 +680,15 @@ def _verify_artifact_manifest(
         )
         if (
             not isinstance(cuda_assertion, dict)
+            or cuda_assertion.get("format")
+            != "colpali-triton-phase11-cuda-test-assertion-v1"
             or cuda_assertion.get("status") != "passed"
-            or not isinstance(observed_counts, dict)
-            or not all(
-                isinstance(value, int) and not isinstance(value, bool)
-                for value in observed_counts.values()
-            )
-            or sum(observed_counts.values()) != 5
+            or cuda_assertion.get("required_counts")
+            != REQUIRED_CUDA_COUNTS
+            or observed_counts != REQUIRED_CUDA_COUNTS
             or cuda_assertion.get("skipped") != []
             or cuda_assertion.get("failed") != []
+            or cuda_assertion.get("errors") != []
         ):
             raise WorkflowError(
                 "remote manifest claims completion without five GPU cases"

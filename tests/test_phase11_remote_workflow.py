@@ -35,6 +35,262 @@ L4_ASSERTION_PATH = (
 SOURCE_COMMIT = "a" * 40
 
 
+def _memory_record() -> dict[str, int]:
+    return {
+        "baseline_allocated_bytes": 1024,
+        "baseline_reserved_bytes": 2048,
+        "peak_allocated_bytes": 4096,
+        "peak_reserved_bytes": 8192,
+        "incremental_peak_allocated_bytes": 3072,
+        "incremental_peak_reserved_bytes": 6144,
+    }
+
+
+def _timing_record(
+    latency: float,
+    *,
+    trials: int,
+    iterations: int,
+    tuning: bool,
+) -> dict:
+    trial_records = [
+        {
+            **({"status": "completed"} if tuning else {}),
+            "trial_index": trial_index,
+            "cuda_event_latency_ms": [latency] * iterations,
+            "memory": _memory_record(),
+        }
+        for trial_index in range(trials)
+    ]
+    samples = trials * iterations
+    record = {
+        "measured_iterations_per_trial": iterations,
+        "summary": {
+            "sample_count": samples,
+            "latency_ms": {"p50": latency},
+        },
+        "trials": trial_records,
+    }
+    if tuning:
+        record.update(
+            {
+                "trial_count_requested": trials,
+                "trial_count_completed": trials,
+                "total_cuda_event_latency_ms": latency * samples,
+            }
+        )
+    else:
+        record["trial_count"] = trials
+    return record
+
+
+def _write_complete_result_evidence(root: Path) -> tuple[dict, str]:
+    tuning_config_path = PROJECT_ROOT / "configs" / "triton_tuning.json"
+    benchmark_config_path = (
+        PROJECT_ROOT / "configs" / "maxsim_benchmark.json"
+    )
+    tuning_config = json.loads(tuning_config_path.read_text())
+    base_benchmark = json.loads(benchmark_config_path.read_text())
+    candidates = tuning_config["candidates"]
+    candidate_ids = [item["candidate_id"] for item in candidates]
+    winner_config = candidates[0]
+    winner_id = winner_config["candidate_id"]
+    launch = {
+        key: winner_config[key]
+        for key in (
+            "block_query_tokens",
+            "block_document_tokens",
+            "block_embedding_dimension",
+            "num_warps",
+            "num_stages",
+        )
+    }
+    source_record = {
+        "effective_commit": SOURCE_COMMIT,
+        "consistent": True,
+        "sources": {
+            "git": None,
+            "environment": SOURCE_COMMIT,
+            "marker_file": SOURCE_COMMIT,
+        },
+    }
+    tuning_results = []
+    tuning_trials = tuning_config["timing"]["trials"]
+    tuning_iterations = tuning_config["timing"]["measured_iterations"]
+    for dtype_spec in tuning_config["dtypes"]:
+        for case in tuning_config["cases"]:
+            case_record = dict(case)
+            case_record["query_document_pairs"] = (
+                case["query_batch_size"] * case["document_batch_size"]
+            )
+            candidate_records = []
+            for candidate_index, candidate in enumerate(candidates):
+                latency = float(candidate_index + 1)
+                candidate_launch = {
+                    key: candidate[key] for key in launch
+                }
+                candidate_records.append(
+                    {
+                        "candidate_id": candidate["candidate_id"],
+                        "launch_configuration": candidate_launch,
+                        "status": "completed",
+                        "numerical_gate": {
+                            "status": "passed",
+                            "agreement": {
+                                "reference_provider": "torch",
+                                "shape_matches": True,
+                                "finite": True,
+                                "agreement": True,
+                            },
+                        },
+                        "timing": _timing_record(
+                            latency,
+                            trials=tuning_trials,
+                            iterations=tuning_iterations,
+                            tuning=True,
+                        ),
+                    }
+                )
+            tuning_results.append(
+                {
+                    "case": case_record,
+                    "dtype": dtype_spec["name"],
+                    "candidates": candidate_records,
+                }
+            )
+    tuning_config_sha = hashlib.sha256(
+        tuning_config_path.read_bytes()
+    ).hexdigest()
+    tuning = {
+        "status": "completed",
+        "selection": {
+            "canonical_full_matrix": True,
+            "candidates": candidate_ids,
+            "dtypes": [item["name"] for item in tuning_config["dtypes"]],
+            "cases": [item["name"] for item in tuning_config["cases"]],
+        },
+        "provenance": {
+            "config_file_sha256": tuning_config_sha,
+            "source_sha256": {
+                "configs/triton_tuning.json": tuning_config_sha,
+            },
+            "source_commit": source_record,
+        },
+        "protocol": {"config": tuning_config},
+        "winner": {
+            "candidate_id": winner_id,
+            "configuration": winner_config,
+            "overall": {
+                "status": "selected",
+                "winner_candidate_id": winner_id,
+                "workload_count": len(tuning_results),
+            },
+        },
+        "results": tuning_results,
+    }
+    tuning_path = root / "triton_tuning.json"
+    tuning_path.write_text(json.dumps(tuning, sort_keys=True) + "\n")
+
+    derived = json.loads(json.dumps(base_benchmark))
+    derived["benchmark_id"] += f"-tuned-{winner_id}"
+    derived["triton_launch"] = launch
+    derived_path = root / "maxsim_benchmark_tuned_config.json"
+    derived_path.write_text(json.dumps(derived, sort_keys=True) + "\n")
+    winner = {
+        "format": "colpali-triton-phase11-tuning-winner-v1",
+        "source_commit": SOURCE_COMMIT,
+        "candidate_id": winner_id,
+        "launch_configuration": launch,
+        "base_benchmark_id": base_benchmark["benchmark_id"],
+        "derived_benchmark_id": derived["benchmark_id"],
+        "canonical_case_count": len(base_benchmark["cases"]),
+        "canonical_dtype_count": len(base_benchmark["dtypes"]),
+        "tuning_result_sha256": hashlib.sha256(
+            tuning_path.read_bytes()
+        ).hexdigest(),
+        "base_benchmark_config_sha256": hashlib.sha256(
+            benchmark_config_path.read_bytes()
+        ).hexdigest(),
+        "derived_benchmark_config_sha256": hashlib.sha256(
+            derived_path.read_bytes()
+        ).hexdigest(),
+    }
+    winner_path = root / "tuning_winner.json"
+    winner_path.write_text(json.dumps(winner, sort_keys=True) + "\n")
+    winner_sha = hashlib.sha256(winner_path.read_bytes()).hexdigest()
+
+    benchmark_results = []
+    benchmark_trials = base_benchmark["timing"]["trials"]
+    benchmark_iterations = base_benchmark["timing"]["measured_iterations"]
+    for dtype_spec in base_benchmark["dtypes"]:
+        for case in base_benchmark["cases"]:
+            case_record = dict(case)
+            case_record["query_document_pairs"] = (
+                case["query_batch_size"] * case["document_batch_size"]
+            )
+            providers = []
+            for provider_name, latency in (("torch", 2.0), ("triton", 1.0)):
+                providers.append(
+                    {
+                        "provider": provider_name,
+                        "launch_configuration": (
+                            launch if provider_name == "triton" else None
+                        ),
+                        "correctness": {
+                            "reference_provider": "torch",
+                            "finite": True,
+                            "agreement": True,
+                            "absolute_tolerance": dtype_spec[
+                                "absolute_tolerance"
+                            ],
+                            "relative_tolerance": dtype_spec[
+                                "relative_tolerance"
+                            ],
+                        },
+                        "timing": _timing_record(
+                            latency,
+                            trials=benchmark_trials,
+                            iterations=benchmark_iterations,
+                            tuning=False,
+                        ),
+                        "memory": {
+                            "maximum_peak_allocated_bytes": 4096,
+                            "maximum_peak_reserved_bytes": 8192,
+                            "maximum_incremental_peak_allocated_bytes": 3072,
+                            "maximum_incremental_peak_reserved_bytes": 6144,
+                        },
+                    }
+                )
+            benchmark_results.append(
+                {
+                    "case": case_record,
+                    "dtype": dtype_spec["name"],
+                    "providers": providers,
+                }
+            )
+    benchmark = {
+        "status": "completed",
+        "selection": {
+            "canonical_full_matrix": True,
+            "providers": ["torch", "triton"],
+            "dtypes": [item["name"] for item in base_benchmark["dtypes"]],
+            "cases": [item["name"] for item in base_benchmark["cases"]],
+        },
+        "provenance": {
+            "source_commit": source_record,
+            "config_file_sha256": hashlib.sha256(
+                derived_path.read_bytes()
+            ).hexdigest(),
+        },
+        "protocol": {"config": derived},
+        "results": benchmark_results,
+    }
+    (root / "maxsim_cuda_benchmark.json").write_text(
+        json.dumps(benchmark, sort_keys=True) + "\n"
+    )
+    return winner, winner_sha
+
+
 def _load_module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None
@@ -83,70 +339,7 @@ def _write_manifest(
     status: str = "complete",
     with_profile: bool = True,
 ) -> tuple[Path, str]:
-    launch = {
-        "block_query_tokens": 16,
-        "block_document_tokens": 32,
-        "block_embedding_dimension": 128,
-        "num_warps": 4,
-        "num_stages": 1,
-    }
-    source_record = {
-        "effective_commit": SOURCE_COMMIT,
-        "consistent": True,
-        "sources": {
-            "git": None,
-            "environment": SOURCE_COMMIT,
-            "marker_file": SOURCE_COMMIT,
-        },
-    }
-    tuning = {
-        "status": "completed",
-        "selection": {"canonical_full_matrix": True},
-        "provenance": {"source_commit": source_record},
-        "winner": {
-            "candidate_id": "winner",
-            "configuration": {"candidate_id": "winner", **launch},
-        },
-    }
-    tuning_path = root / "triton_tuning.json"
-    tuning_path.write_text(json.dumps(tuning, sort_keys=True) + "\n")
-    derived = json.loads(
-        (PROJECT_ROOT / "configs" / "maxsim_benchmark.json").read_text()
-    )
-    derived["benchmark_id"] += "-tuned-winner"
-    derived["triton_launch"] = launch
-    derived_path = root / "maxsim_benchmark_tuned_config.json"
-    derived_path.write_text(json.dumps(derived, sort_keys=True) + "\n")
-    winner = {
-        "format": "colpali-triton-phase11-tuning-winner-v1",
-        "source_commit": SOURCE_COMMIT,
-        "candidate_id": "winner",
-        "launch_configuration": launch,
-        "tuning_result_sha256": hashlib.sha256(
-            tuning_path.read_bytes()
-        ).hexdigest(),
-        "derived_benchmark_config_sha256": hashlib.sha256(
-            derived_path.read_bytes()
-        ).hexdigest(),
-    }
-    winner_path = root / "tuning_winner.json"
-    winner_path.write_text(json.dumps(winner, sort_keys=True) + "\n")
-    winner_sha = hashlib.sha256(winner_path.read_bytes()).hexdigest()
-    benchmark = {
-        "status": "completed",
-        "selection": {"canonical_full_matrix": True},
-        "provenance": {
-            "source_commit": source_record,
-            "config_file_sha256": hashlib.sha256(
-                derived_path.read_bytes()
-            ).hexdigest(),
-        },
-        "protocol": {"config": derived},
-        "results": [{} for _ in range(12)],
-    }
-    (root / "maxsim_cuda_benchmark.json").write_text(
-        json.dumps(benchmark, sort_keys=True) + "\n"
-    )
+    winner, winner_sha = _write_complete_result_evidence(root)
     cross_check = workflow.validate_result_contract(
         root,
         source_commit=SOURCE_COMMIT,
@@ -172,14 +365,15 @@ def _write_manifest(
     (root / "cuda_test_assertion.json").write_text(
         json.dumps(
             {
+                "format": (
+                    "colpali-triton-phase11-cuda-test-assertion-v1"
+                ),
                 "status": "passed",
-                "observed_counts": {
-                    "parity": 3,
-                    "noncontiguous": 1,
-                    "nan": 1,
-                },
+                "required_counts": workflow.REQUIRED_CUDA_COUNTS,
+                "observed_counts": workflow.REQUIRED_CUDA_COUNTS,
                 "skipped": [],
                 "failed": [],
+                "errors": [],
             },
             sort_keys=True,
         )
@@ -190,7 +384,7 @@ def _write_manifest(
         metadata = {
             "format": "colpali-triton-phase11-profile-probe-v2",
             "source_commit": SOURCE_COMMIT,
-            "winner_candidate_id": "winner",
+            "winner_candidate_id": winner["candidate_id"],
             "winner_record_sha256": winner_sha,
             "launch_configuration": winner["launch_configuration"],
         }
@@ -206,6 +400,20 @@ def _write_manifest(
         "winner_record_sha256": winner_sha,
         "attempts": [],
     }
+    steps = {
+        name: {"exit_code": 0, "succeeded": True}
+        for name in workflow.MANDATORY_PHASE11_STEPS
+    }
+    (root / "step_status.json").write_text(
+        json.dumps(
+            {
+                "format": "colpali-triton-phase11-step-status-v1",
+                "steps": steps,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
     records = []
     for path in sorted(root.iterdir()):
         if not path.is_file():
@@ -225,12 +433,7 @@ def _write_manifest(
             [] if status == "complete" else ["profiling failed"]
         ),
         "profiling": profiling,
-        "steps": {
-            "container_build": {
-                "exit_code": 0,
-                "succeeded": True,
-            }
-        },
+        "steps": steps,
         "source_commit": SOURCE_COMMIT,
         "run_id": "phase11-test",
         "files": records,
@@ -244,6 +447,30 @@ def _write_manifest(
         f"{manifest_sha}  artifact_manifest.json\n"
     )
     return manifest_path, manifest_sha
+
+
+def _reseal_manifest(root: Path, manifest: dict) -> None:
+    records = []
+    for path in sorted(root.iterdir()):
+        if (
+            not path.is_file()
+            or path.name in {"artifact_manifest.json", "SEALED.sha256"}
+        ):
+            continue
+        records.append(
+            {
+                "path": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size_bytes": path.stat().st_size,
+            }
+        )
+    manifest["files"] = records
+    manifest_path = root / "artifact_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    (root / "SEALED.sha256").write_text(
+        f"{manifest_sha}  artifact_manifest.json\n"
+    )
 
 
 def _write_profile_winner(
@@ -442,6 +669,122 @@ def test_manifest_verification_detects_payload_tampering(
     with pytest.raises(
         workflow.WorkflowError,
         match="cross-check differs|failed verification",
+    ):
+        workflow._verify_artifact_manifest(
+            root,
+            source_commit=SOURCE_COMMIT,
+            run_id="phase11-test",
+        )
+
+
+def test_result_contract_rejects_placeholder_benchmark_results(
+    tmp_path: Path,
+) -> None:
+    _write_complete_result_evidence(tmp_path)
+    benchmark_path = tmp_path / "maxsim_cuda_benchmark.json"
+    benchmark = json.loads(benchmark_path.read_text())
+    benchmark["results"] = [{} for _ in range(12)]
+    benchmark_path.write_text(json.dumps(benchmark, sort_keys=True) + "\n")
+
+    result = workflow.validate_result_contract(
+        tmp_path,
+        source_commit=SOURCE_COMMIT,
+    )
+
+    assert result["status"] == "failed"
+    assert any(
+        "shape/dtype is invalid" in error for error in result["errors"]
+    )
+
+
+def test_result_contract_recomputes_the_measured_tuning_winner(
+    tmp_path: Path,
+) -> None:
+    _write_complete_result_evidence(tmp_path)
+    tuning_path = tmp_path / "triton_tuning.json"
+    tuning = json.loads(tuning_path.read_text())
+    faster_candidate_id = tuning["protocol"]["config"]["candidates"][1][
+        "candidate_id"
+    ]
+    for workload in tuning["results"]:
+        candidate = next(
+            item
+            for item in workload["candidates"]
+            if item["candidate_id"] == faster_candidate_id
+        )
+        timing = candidate["timing"]
+        for trial in timing["trials"]:
+            trial["cuda_event_latency_ms"] = [0.5] * len(
+                trial["cuda_event_latency_ms"]
+            )
+        timing["summary"]["latency_ms"]["p50"] = 0.5
+        timing["total_cuda_event_latency_ms"] = 0.5 * sum(
+            len(trial["cuda_event_latency_ms"])
+            for trial in timing["trials"]
+        )
+    tuning_path.write_text(json.dumps(tuning, sort_keys=True) + "\n")
+
+    result = workflow.validate_result_contract(
+        tmp_path,
+        source_commit=SOURCE_COMMIT,
+    )
+
+    assert result["status"] == "failed"
+    assert "claimed tuning winner is not the measured winner" in (
+        result["errors"]
+    )
+
+
+@pytest.mark.parametrize("mutation", ("missing_step", "status_disagreement"))
+def test_manifest_requires_exact_steps_and_step_status_agreement(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    root = tmp_path / "phase11-test"
+    root.mkdir()
+    manifest_path, _ = _write_manifest(root)
+    manifest = json.loads(manifest_path.read_text())
+    step_status_path = root / "step_status.json"
+    step_status = json.loads(step_status_path.read_text())
+    if mutation == "missing_step":
+        manifest["steps"].pop("benchmark")
+        step_status["steps"].pop("benchmark")
+    else:
+        step_status["steps"]["benchmark"] = {
+            "exit_code": 7,
+            "succeeded": False,
+        }
+    step_status_path.write_text(json.dumps(step_status, sort_keys=True) + "\n")
+    _reseal_manifest(root, manifest)
+
+    with pytest.raises(
+        workflow.WorkflowError,
+        match="mandatory-step status is invalid",
+    ):
+        workflow._verify_artifact_manifest(
+            root,
+            source_commit=SOURCE_COMMIT,
+            run_id="phase11-test",
+        )
+
+
+def test_manifest_rejects_unrelated_cuda_count_keys(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase11-test"
+    root.mkdir()
+    manifest_path, _ = _write_manifest(root)
+    manifest = json.loads(manifest_path.read_text())
+    assertion_path = root / "cuda_test_assertion.json"
+    assertion = json.loads(assertion_path.read_text())
+    assertion["required_counts"] = {"parity": 5}
+    assertion["observed_counts"] = {"parity": 5}
+    assertion_path.write_text(json.dumps(assertion, sort_keys=True) + "\n")
+    _reseal_manifest(root, manifest)
+
+    with pytest.raises(
+        workflow.WorkflowError,
+        match="without five GPU cases",
     ):
         workflow._verify_artifact_manifest(
             root,
@@ -972,6 +1315,21 @@ def test_incomplete_contract_replays_identically_under_new_root(
         "winner_record_sha256": None,
         "attempts": [],
     }
+    steps = {
+        name: {"exit_code": 0, "succeeded": True}
+        for name in workflow.MANDATORY_PHASE11_STEPS
+    }
+    steps["tuning"] = {"exit_code": 1, "succeeded": False}
+    (remote_root / "step_status.json").write_text(
+        json.dumps(
+            {
+                "format": "colpali-triton-phase11-step-status-v1",
+                "steps": steps,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
     files = []
     for path in sorted(remote_root.iterdir()):
         files.append(
@@ -987,12 +1345,7 @@ def test_incomplete_contract_replays_identically_under_new_root(
         "status": "incomplete",
         "failure_reasons": ["mandatory step failed: tuning"],
         "profiling": profiling,
-        "steps": {
-            "tuning": {
-                "exit_code": 1,
-                "succeeded": False,
-            }
-        },
+        "steps": steps,
         "source_commit": SOURCE_COMMIT,
         "run_id": "phase11-incomplete",
         "files": files,
