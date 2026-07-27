@@ -1004,7 +1004,13 @@ def _write_json_atomic(
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         temporary.write_text(
-            json.dumps(value, indent=2, sort_keys=True) + "\n",
+            json.dumps(
+                value,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n",
             encoding="utf-8",
         )
         if overwrite:

@@ -231,6 +231,22 @@ def test_git_state_survives_missing_git_binary(
     assert "FileNotFoundError" in record["error"]
 
 
+def test_atomic_json_writer_rejects_nonfinite_values(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "invalid.json"
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        runner._write_json_atomic(
+            output,
+            {"invalid": float("nan")},
+            overwrite=False,
+        )
+
+    assert not output.exists()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
 def test_nvidia_smi_query_parses_rows_and_survives_missing_binary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
