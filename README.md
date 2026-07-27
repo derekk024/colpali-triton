@@ -2,18 +2,35 @@
 
 This repository is a scoped reproduction of
 [ColPali: Efficient Document Retrieval with Vision Language Models](https://arxiv.org/abs/2407.01449).
-The completed local milestones cover phases 1–9: paper analysis, project
-scaffolding, nested-loop and vectorized PyTorch MaxSim, correctness and gradient
-tests, the paper's hardest-in-batch loss, and a controlled synthetic overfit
-proof, followed by pinned ViDoRe text loaders, retrieval metrics, and measured
-OCR-text baselines, plus a paper-era PaliGemma/ColPali model, processor, and
-LoRA integration, a real released-checkpoint Apple MPS smoke test, and scoped
-multimodal retrieval results with a mean-pooled ablation.
+Phases 1–10 are implemented and locally verified: paper analysis, tested
+PyTorch MaxSim references, the paper's hardest-in-batch loss, a controlled
+synthetic overfit proof, pinned ViDoRe loaders, measured OCR-text baselines,
+paper-era PaliGemma/ColPali and LoRA integration, a real Apple MPS smoke test,
+scoped multimodal results with a mean-pooled ablation, and a reproducible CUDA
+container, guarded AWS L4 workflow, and benchmark harness.
 
 Phase 6 uses a revision-pinned BGE-M3 checkpoint and remote, column-selective
 reads of two ViDoRe tasks. Phase 7 pins the public BF16 ViDoRe base and the
-original released adapter by full revision and weight digest. AWS resources
-and Triton kernels are not used yet.
+original released adapter by full revision and weight digest. The Phase 11
+Triton forward kernel is implemented and CUDA-gated tests are committed, but
+it has not yet run on NVIDIA hardware. No AWS resources have been created.
+
+## Completion status
+
+The project is not complete yet. The remaining acceptance gate is a real
+NVIDIA run followed by the final report.
+
+| Acceptance item | Status |
+| --- | --- |
+| Local unit suite | Complete: 510 passed |
+| Nested-loop/vectorized PyTorch parity and gradients | Complete |
+| Controlled synthetic overfit | Complete |
+| Two real retrieval baselines | Complete |
+| Scoped released-ColPali results and mean-pooling ablation | Complete |
+| Pinned CUDA/AWS environment and benchmark protocol | Complete locally |
+| Triton execution and PyTorch numerical parity on NVIDIA | Pending L4 run |
+| Reproducible GPU latency, throughput, memory, profiling, and tuning | Pending L4 run |
+| Final discrepancies/limitations report | Pending measured GPU results |
 
 ## Current implementation
 
@@ -228,6 +245,50 @@ comparisons. Exact selection rules, timing, throughput, memory, score-matrix
 digests, raw-result digests, and limitations are in
 [the Phase 9 report](reports/phase_9_colpali_subset.md).
 
+## Phase 10 GPU environment and Phase 11 readiness
+
+The GPU environment is pinned to `linux/amd64` and the immutable base:
+
+```text
+pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel@sha256:0cf3402e946b7c384ba943ee05c90b4c5a4a05227923921f2b0918c011cfaf56
+```
+
+It asserts PyTorch 2.6.0, CUDA 12.4, and Triton 3.2.0. The AWS lifecycle tool
+accepts only `g6.xlarge` or `g6.2xlarge`, requires an explicit region, subnet,
+security group, and key name, and makes `plan` entirely offline:
+
+```bash
+python3 infra/aws/l4_lifecycle.py plan \
+  --region us-west-2 \
+  --subnet-id subnet-0123456789abcdef0 \
+  --security-group-id sg-0123456789abcdef0 \
+  --key-name colpali-benchmark
+```
+
+`launch` remains offline unless both `--execute` and the exact cost
+acknowledgement are supplied. Execution resolves and records an immutable
+Amazon-owned GPU DLAMI, performs AWS permission dry-runs, launches one tagged
+instance, and writes a protected receipt. Termination requires the exact
+instance ID twice and verifies all managed tags before mutation. See
+[the AWS L4 guide](infra/aws/README.md) for launch, deployment, status, and
+termination commands.
+
+The canonical benchmark fixes six ColPali-shaped workloads, FP16 and BF16,
+PyTorch and Triton providers, numerical tolerances, 10 warmups, five trials of
+50 CUDA-event measurements, and the exact Triton launch configuration
+`query=16`, `document=64`, `dimension=128`, four warps, and two stages.
+
+```bash
+python benchmarks/benchmark_maxsim.py --preflight
+python benchmarks/benchmark_maxsim.py
+```
+
+The local preflight correctly reports that this Mac lacks a CUDA PyTorch build
+and Triton runtime. The full command must run inside the pinned NVIDIA
+container before any GPU correctness or performance claim is valid. See
+[the Phase 10 readiness report](reports/phase_10_gpu_preparation.md) and
+[the benchmark protocol](benchmarks/README.md).
+
 ## Local setup
 
 Python 3.9 or newer is supported.
@@ -283,7 +344,9 @@ tests/                    unit, gradient, integration-contract, and overfit test
 reports/                  paper notes, implementation plan, and recorded results
 configs/                  committed experiment settings and thresholds
 scripts/                  reproducible experiment entry points
-benchmarks/               future CUDA/Triton benchmark harnesses
+benchmarks/               reproducible CUDA/Triton correctness and timing harness
+docker/                   digest-pinned linux/amd64 CUDA environment
+infra/aws/                guarded L4 lifecycle, bootstrap, and deployment tools
 ```
 
 See [the phase 1 implementation plan](reports/phase_1_implementation_plan.md)
@@ -293,5 +356,5 @@ phases 1–4 run remains in [the original local test report](reports/local_test_
 the phase-5 experiment is in [its test report](reports/phase_5_test_results.md);
 the Phase 6 baseline suite is in
 [its test report](reports/phase_6_test_results.md); and the latest complete
-local verification is recorded in
-[the Phase 9 report](reports/phase_9_colpali_subset.md).
+local verification and remaining NVIDIA gate are recorded in
+[the Phase 10 readiness report](reports/phase_10_gpu_preparation.md).
