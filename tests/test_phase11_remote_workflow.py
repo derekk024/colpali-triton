@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +18,18 @@ WORKFLOW_PATH = PROJECT_ROOT / "infra" / "aws" / "phase11_remote.py"
 JOB_PATH = PROJECT_ROOT / "infra" / "aws" / "run_phase11_job.sh"
 PROFILE_PATH = (
     PROJECT_ROOT / "infra" / "aws" / "profile_phase11_maxsim.py"
+)
+CUDA_ASSERTION_PATH = (
+    PROJECT_ROOT / "infra" / "aws" / "assert_phase11_cuda_tests.py"
+)
+PROFILE_STATUS_PATH = (
+    PROJECT_ROOT / "infra" / "aws" / "phase11_profile_status.py"
+)
+DERIVE_WINNER_PATH = (
+    PROJECT_ROOT / "infra" / "aws" / "derive_phase11_winner.py"
+)
+L4_ASSERTION_PATH = (
+    PROJECT_ROOT / "infra" / "aws" / "assert_phase11_l4.py"
 )
 SOURCE_COMMIT = "a" * 40
 
@@ -32,6 +45,18 @@ def _load_module(name: str, path: Path):
 
 
 workflow = _load_module("phase11_remote_workflow", WORKFLOW_PATH)
+cuda_assertion = _load_module(
+    "phase11_cuda_test_assertion", CUDA_ASSERTION_PATH
+)
+profile_status = _load_module(
+    "phase11_profile_status", PROFILE_STATUS_PATH
+)
+derive_winner = _load_module(
+    "phase11_derive_winner", DERIVE_WINNER_PATH
+)
+l4_assertion = _load_module(
+    "phase11_l4_assertion", L4_ASSERTION_PATH
+)
 
 
 def _spec(tmp_path: Path, **overrides):
@@ -51,32 +76,207 @@ def _spec(tmp_path: Path, **overrides):
     return workflow.RemoteSpec(**values)
 
 
-def _write_manifest(root: Path) -> tuple[Path, str]:
-    payload = root / "maxsim_cuda_benchmark.json"
-    payload.write_text('{"status":"completed"}\n')
-    payload_sha = hashlib.sha256(payload.read_bytes()).hexdigest()
+def _write_manifest(
+    root: Path,
+    *,
+    status: str = "complete",
+    with_profile: bool = True,
+) -> tuple[Path, str]:
+    launch = {
+        "block_query_tokens": 16,
+        "block_document_tokens": 32,
+        "block_embedding_dimension": 128,
+        "num_warps": 4,
+        "num_stages": 1,
+    }
+    source_record = {
+        "effective_commit": SOURCE_COMMIT,
+        "consistent": True,
+        "sources": {
+            "git": None,
+            "environment": SOURCE_COMMIT,
+            "marker_file": SOURCE_COMMIT,
+        },
+    }
+    tuning = {
+        "status": "completed",
+        "selection": {"canonical_full_matrix": True},
+        "provenance": {"source_commit": source_record},
+        "winner": {
+            "candidate_id": "winner",
+            "configuration": {"candidate_id": "winner", **launch},
+        },
+    }
+    tuning_path = root / "triton_tuning.json"
+    tuning_path.write_text(json.dumps(tuning, sort_keys=True) + "\n")
+    derived = json.loads(
+        (PROJECT_ROOT / "configs" / "maxsim_benchmark.json").read_text()
+    )
+    derived["benchmark_id"] += "-tuned-winner"
+    derived["triton_launch"] = launch
+    derived_path = root / "maxsim_benchmark_tuned_config.json"
+    derived_path.write_text(json.dumps(derived, sort_keys=True) + "\n")
+    winner = {
+        "format": "colpali-triton-phase11-tuning-winner-v1",
+        "source_commit": SOURCE_COMMIT,
+        "candidate_id": "winner",
+        "launch_configuration": launch,
+        "tuning_result_sha256": hashlib.sha256(
+            tuning_path.read_bytes()
+        ).hexdigest(),
+        "derived_benchmark_config_sha256": hashlib.sha256(
+            derived_path.read_bytes()
+        ).hexdigest(),
+    }
+    winner_path = root / "tuning_winner.json"
+    winner_path.write_text(json.dumps(winner, sort_keys=True) + "\n")
+    winner_sha = hashlib.sha256(winner_path.read_bytes()).hexdigest()
+    benchmark = {
+        "status": "completed",
+        "selection": {"canonical_full_matrix": True},
+        "provenance": {
+            "source_commit": source_record,
+            "config_file_sha256": hashlib.sha256(
+                derived_path.read_bytes()
+            ).hexdigest(),
+        },
+        "protocol": {"config": derived},
+        "results": [{} for _ in range(12)],
+    }
+    (root / "maxsim_cuda_benchmark.json").write_text(
+        json.dumps(benchmark, sort_keys=True) + "\n"
+    )
+    cross_check = workflow.validate_result_contract(
+        root,
+        source_commit=SOURCE_COMMIT,
+    )
+    assert cross_check["status"] == "passed"
+    (root / "result_contract_validation.json").write_text(
+        json.dumps(cross_check, sort_keys=True) + "\n"
+    )
+    (root / "hardware_gate.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "device": {
+                    "name": "NVIDIA L4",
+                    "compute_capability": [8, 9],
+                    "total_memory_bytes": 23 * 1024**3,
+                },
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    (root / "cuda_test_assertion.json").write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "observed_counts": {
+                    "parity": 3,
+                    "noncontiguous": 1,
+                    "nan": 1,
+                },
+                "skipped": [],
+                "failed": [],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    if with_profile:
+        (root / "maxsim_profile.ncu-rep").write_bytes(b"real-profile")
+        metadata = {
+            "format": "colpali-triton-phase11-profile-probe-v2",
+            "source_commit": SOURCE_COMMIT,
+            "winner_candidate_id": "winner",
+            "winner_record_sha256": winner_sha,
+            "launch_configuration": winner["launch_configuration"],
+        }
+        (root / "profile_probe_ncu.json").write_text(
+            json.dumps(metadata, sort_keys=True) + "\n"
+        )
+    profiling = {
+        "succeeded": with_profile,
+        "profiler": "ncu" if with_profile else None,
+        "report": "maxsim_profile.ncu-rep" if with_profile else None,
+        "metadata": "profile_probe_ncu.json" if with_profile else None,
+        "winner_record": "tuning_winner.json",
+        "winner_record_sha256": winner_sha,
+        "attempts": [],
+    }
+    records = []
+    for path in sorted(root.iterdir()):
+        if not path.is_file():
+            continue
+        records.append(
+            {
+                "path": path.name,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size_bytes": path.stat().st_size,
+            }
+        )
     manifest = {
-        "format": "colpali-triton-phase11-artifact-manifest-v1",
-        "completed_at": "2026-07-26T00:00:00Z",
+        "format": "colpali-triton-phase11-artifact-manifest-v2",
+        "sealed_at": "2026-07-26T00:00:00Z",
+        "status": status,
+        "failure_reasons": (
+            [] if status == "complete" else ["profiling failed"]
+        ),
+        "profiling": profiling,
+        "steps": {
+            "container_build": {
+                "exit_code": 0,
+                "succeeded": True,
+            }
+        },
         "source_commit": SOURCE_COMMIT,
         "run_id": "phase11-test",
-        "files": [
-            {
-                "path": payload.name,
-                "sha256": payload_sha,
-                "size_bytes": payload.stat().st_size,
-            }
-        ],
+        "files": records,
     }
     manifest_path = root / "artifact_manifest.json"
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True) + "\n"
     )
     manifest_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
-    (root / "COMPLETE.sha256").write_text(
+    (root / "SEALED.sha256").write_text(
         f"{manifest_sha}  artifact_manifest.json\n"
     )
     return manifest_path, manifest_sha
+
+
+def _write_profile_winner(
+    root: Path,
+    *,
+    profiler: str | None = None,
+) -> Path:
+    winner = {
+        "format": "colpali-triton-phase11-tuning-winner-v1",
+        "source_commit": SOURCE_COMMIT,
+        "candidate_id": "winner",
+        "launch_configuration": {
+            "block_query_tokens": 16,
+            "block_document_tokens": 32,
+            "block_embedding_dimension": 128,
+            "num_warps": 4,
+            "num_stages": 1,
+        },
+    }
+    winner_path = root / "tuning_winner.json"
+    winner_path.write_text(json.dumps(winner, sort_keys=True) + "\n")
+    if profiler is not None:
+        winner_sha = hashlib.sha256(winner_path.read_bytes()).hexdigest()
+        metadata = {
+            "format": "colpali-triton-phase11-profile-probe-v2",
+            "source_commit": SOURCE_COMMIT,
+            "winner_candidate_id": "winner",
+            "winner_record_sha256": winner_sha,
+            "launch_configuration": winner["launch_configuration"],
+        }
+        (root / f"profile_probe_{profiler}.json").write_text(
+            json.dumps(metadata, sort_keys=True) + "\n"
+        )
+    return winner_path
 
 
 def test_offline_plan_states_every_remote_safety_boundary(
@@ -100,10 +300,10 @@ def test_offline_plan_states_every_remote_safety_boundary(
         "local_results_overwritten": False,
         "instance_left_running_after_completion": True,
     }
-    assert any("complete test suite" in step for step in plan["steps"])
+    assert any("zero-skip parity" in step for step in plan["steps"])
     assert any("tuning matrix" in step for step in plan["steps"])
     assert any("canonical" in step for step in plan["steps"])
-    assert any("profiler" in step for step in plan["steps"])
+    assert any("ncu then nsys" in step for step in plan["steps"])
 
 
 def test_plan_main_invokes_only_local_git(
@@ -217,18 +417,66 @@ def test_manifest_verification_detects_payload_tampering(
     root.mkdir()
     _, expected_sha = _write_manifest(root)
 
-    actual_sha, records = workflow._verify_artifact_manifest(
+    actual_sha, records, status, reasons = (
+        workflow._verify_artifact_manifest(
+            root,
+            source_commit=SOURCE_COMMIT,
+            run_id="phase11-test",
+        )
+    )
+
+    assert actual_sha == expected_sha
+    assert status == "complete"
+    assert reasons == []
+    assert {
+        "maxsim_cuda_benchmark.json",
+        "maxsim_profile.ncu-rep",
+        "profile_probe_ncu.json",
+        "tuning_winner.json",
+        "triton_tuning.json",
+        "maxsim_benchmark_tuned_config.json",
+        "result_contract_validation.json",
+    }.issubset({record["path"] for record in records})
+    (root / "maxsim_cuda_benchmark.json").write_text("tampered")
+    with pytest.raises(
+        workflow.WorkflowError,
+        match="cross-check differs|failed verification",
+    ):
+        workflow._verify_artifact_manifest(
+            root,
+            source_commit=SOURCE_COMMIT,
+            run_id="phase11-test",
+        )
+
+
+def test_manifest_preserves_explicit_incomplete_profile_state(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase11-test"
+    root.mkdir()
+    _write_manifest(root, status="incomplete", with_profile=False)
+
+    _, _, status, reasons = workflow._verify_artifact_manifest(
         root,
         source_commit=SOURCE_COMMIT,
         run_id="phase11-test",
     )
 
-    assert actual_sha == expected_sha
-    assert [record["path"] for record in records] == [
-        "maxsim_cuda_benchmark.json"
-    ]
-    (root / "maxsim_cuda_benchmark.json").write_text("tampered")
-    with pytest.raises(workflow.WorkflowError, match="failed verification"):
+    assert status == "incomplete"
+    assert reasons == ["profiling failed"]
+
+
+def test_manifest_cannot_claim_completion_without_real_profile(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "phase11-test"
+    root.mkdir()
+    _write_manifest(root, status="complete", with_profile=False)
+
+    with pytest.raises(
+        workflow.WorkflowError,
+        match="claims completion without a real profile",
+    ):
         workflow._verify_artifact_manifest(
             root,
             source_commit=SOURCE_COMMIT,
@@ -299,14 +547,38 @@ def test_safe_extract_copies_only_regular_files_with_safe_modes(
 def test_remote_job_has_bounded_complete_contract_and_no_termination() -> None:
     script = JOB_PATH.read_text()
 
-    assert "python -m pytest" in script
+    assert "CUDA_TEST_FILES=(" in script
+    assert "tests/test_triton_maxsim.py" in script
+    assert "tests/test_tune_triton_maxsim_script.py" in script
+    assert "assert_phase11_cuda_tests.py" in script
+    assert "assert_phase11_l4.py" in script
     assert "benchmarks/tune_triton_maxsim.py --preflight" in script
     assert "--output /phase11-results/triton_tuning.json" in script
+    assert (
+        '"${DOCKER_OPTIONS[@]}" "${IMAGE_NAME}" \\\n'
+        "        python infra/aws/derive_phase11_winner.py"
+    ) in script
+    assert "--config /phase11-results/maxsim_benchmark_tuned_config.json" in (
+        script
+    )
     assert "benchmarks/benchmark_maxsim.py" in script
     assert "--output /phase11-results/maxsim_cuda_benchmark.json" in script
-    assert "timeout --signal=TERM --kill-after=30s 300s" in script
+    assert script.count(
+        "timeout --signal=TERM --kill-after=30s 300s"
+    ) == 2
+    assert "maxsim_profile.ncu-rep" in script
+    assert "maxsim_profile.nsys-rep" in script
+    assert "--winner-record /phase11-results/tuning_winner.json" in script
+    assert "--cap-add" in script
+    assert "SYS_ADMIN" in script
+    assert "--privileged" not in script
+    assert "phase11_result_contract.py" in script
+    assert 'status = "complete" if not failure_reasons else "incomplete"' in (
+        script
+    )
     assert "artifact_manifest.json" in script
-    assert "COMPLETE.sha256" in script
+    assert "SEALED.sha256" in script
+    assert "COMPLETE.sha256" not in script
     assert "terminate-instances" not in script
     assert "l4_lifecycle.py terminate" not in script
 
@@ -318,3 +590,352 @@ def test_profiler_probe_is_one_fixed_colpali_shape() -> None:
     assert "(32, 1030, 128)" in source
     assert "torch.inference_mode()" in source
     assert source.count("maxsim_triton(") == 1
+
+
+def test_cuda_assertion_requires_all_five_cases_without_skips(
+    tmp_path: Path,
+) -> None:
+    cases = """
+      <testcase classname="tests.test_triton_maxsim"
+        name="test_cuda_kernel_matches_vectorized_reference[float16-0.002-0.002]"/>
+      <testcase classname="tests.test_triton_maxsim"
+        name="test_cuda_kernel_matches_vectorized_reference[bfloat16-0.02-0.02]"/>
+      <testcase classname="tests.test_triton_maxsim"
+        name="test_cuda_kernel_matches_vectorized_reference[float32-0.0002-0.0002]"/>
+      <testcase classname="tests.test_triton_maxsim"
+        name="test_cuda_kernel_handles_noncontiguous_inputs_and_empty_masks"/>
+      <testcase classname="tests.test_triton_maxsim"
+        name="test_cuda_kernel_propagates_active_nan_across_document_tiles"/>
+    """
+    junit = tmp_path / "cuda.xml"
+    junit.write_text(f"<testsuites><testsuite>{cases}</testsuite></testsuites>")
+
+    result = cuda_assertion.inspect_junit(junit)
+
+    assert result["status"] == "passed"
+    assert sum(result["observed_counts"].values()) == 5
+
+
+def test_cuda_assertion_rejects_a_skipped_parity_case(
+    tmp_path: Path,
+) -> None:
+    junit = tmp_path / "cuda.xml"
+    junit.write_text(
+        """
+        <testsuites><testsuite>
+          <testcase classname="tests.test_triton_maxsim"
+            name="test_cuda_kernel_matches_vectorized_reference[float16]">
+            <skipped message="CUDA absent"/>
+          </testcase>
+        </testsuite></testsuites>
+        """
+    )
+
+    result = cuda_assertion.inspect_junit(junit)
+
+    assert result["status"] == "failed"
+    assert result["skipped"]
+    assert any("expected 3" in error for error in result["errors"])
+
+
+def test_incomplete_remote_result_returns_nonzero_after_execute(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    identity = tmp_path / "benchmark.pem"
+    identity.write_text("key")
+    identity.chmod(0o600)
+    called = []
+
+    monkeypatch.setattr(
+        workflow,
+        "_source_state",
+        lambda: (SOURCE_COMMIT, []),
+    )
+    monkeypatch.setattr(workflow, "_local_preflight", lambda spec: [])
+
+    def fake_execute(spec):
+        called.append(spec)
+        return {
+            "status": "incomplete",
+            "failure_reasons": ["no profiler report"],
+        }
+
+    monkeypatch.setattr(workflow, "execute", fake_execute)
+    status = workflow.main(
+        (
+            "--host",
+            "203.0.113.10",
+            "--identity-file",
+            str(identity),
+            "--run-id",
+            "phase11-test",
+            "--local-result-base",
+            str(tmp_path / "local"),
+            "--execute",
+            "--acknowledge-run",
+            workflow.RUN_ACKNOWLEDGEMENT,
+        )
+    )
+
+    assert called
+    assert status == 3
+    assert json.loads(capsys.readouterr().out)["status"] == "incomplete"
+
+
+def test_missing_profilers_are_incomplete(tmp_path: Path) -> None:
+    winner = _write_profile_winner(tmp_path)
+    result = profile_status.evaluate_profile_attempts(
+        tmp_path,
+        (
+            {
+                "profiler": "ncu",
+                "attempted": False,
+                "exit_code": -1,
+                "report": "",
+                "metadata": "",
+            },
+            {
+                "profiler": "nsys",
+                "attempted": False,
+                "exit_code": -1,
+                "report": "",
+                "metadata": "",
+            },
+        ),
+        winner_record=winner,
+    )
+
+    assert result["succeeded"] is False
+    assert result["profiler"] is None
+    assert result["report"] is None
+
+
+def test_failed_ncu_falls_back_to_successful_nsys(
+    tmp_path: Path,
+) -> None:
+    winner = _write_profile_winner(tmp_path, profiler="nsys")
+    (tmp_path / "maxsim_profile.nsys-rep").write_bytes(b"nsys-report")
+    result = profile_status.evaluate_profile_attempts(
+        tmp_path,
+        (
+            {
+                "profiler": "ncu",
+                "attempted": True,
+                "exit_code": 1,
+                "report": "",
+                "metadata": "",
+            },
+            {
+                "profiler": "nsys",
+                "attempted": True,
+                "exit_code": 0,
+                "report": "maxsim_profile.nsys-rep",
+                "metadata": "profile_probe_nsys.json",
+            },
+        ),
+        winner_record=winner,
+    )
+
+    assert result["succeeded"] is True
+    assert result["profiler"] == "nsys"
+    assert result["report"] == "maxsim_profile.nsys-rep"
+    assert result["attempts"][0]["succeeded"] is False
+    assert result["attempts"][1]["succeeded"] is True
+
+
+def test_zero_exit_without_nonempty_profile_is_not_success(
+    tmp_path: Path,
+) -> None:
+    winner = _write_profile_winner(tmp_path, profiler="ncu")
+    (tmp_path / "maxsim_profile.ncu-rep").touch()
+    result = profile_status.evaluate_profile_attempts(
+        tmp_path,
+        (
+            {
+                "profiler": "ncu",
+                "attempted": True,
+                "exit_code": 0,
+                "report": "maxsim_profile.ncu-rep",
+                "metadata": "profile_probe_ncu.json",
+            },
+            {
+                "profiler": "nsys",
+                "attempted": False,
+                "exit_code": -1,
+                "report": "",
+                "metadata": "",
+            },
+        ),
+        winner_record=winner,
+    )
+
+    assert result["succeeded"] is False
+    assert result["attempts"][0]["report_valid"] is False
+
+
+def test_profile_metadata_must_match_tuning_winner(
+    tmp_path: Path,
+) -> None:
+    winner = _write_profile_winner(tmp_path, profiler="ncu")
+    metadata_path = tmp_path / "profile_probe_ncu.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["launch_configuration"]["num_warps"] = 8
+    metadata_path.write_text(json.dumps(metadata) + "\n")
+    (tmp_path / "maxsim_profile.ncu-rep").write_bytes(b"ncu-report")
+
+    result = profile_status.evaluate_profile_attempts(
+        tmp_path,
+        (
+            {
+                "profiler": "ncu",
+                "attempted": True,
+                "exit_code": 0,
+                "report": "maxsim_profile.ncu-rep",
+                "metadata": "profile_probe_ncu.json",
+            },
+            {
+                "profiler": "nsys",
+                "attempted": False,
+                "exit_code": -1,
+                "report": "",
+                "metadata": "",
+            },
+        ),
+        winner_record=winner,
+    )
+
+    assert result["succeeded"] is False
+    assert result["attempts"][0]["metadata_matches_winner"] is False
+
+
+def _synthetic_tuning_winner(
+    *,
+    block_document_tokens: int = 32,
+) -> dict:
+    launch = {
+        "candidate_id": "tq16_td32_w4_s1",
+        "block_query_tokens": 16,
+        "block_document_tokens": block_document_tokens,
+        "block_embedding_dimension": 128,
+        "num_warps": 4,
+        "num_stages": 1,
+    }
+    return {
+        "status": "completed",
+        "selection": {"canonical_full_matrix": True},
+        "provenance": {
+            "source_commit": {
+                "effective_commit": SOURCE_COMMIT,
+                "consistent": True,
+                "sources": {
+                    "git": None,
+                    "environment": SOURCE_COMMIT,
+                    "marker_file": SOURCE_COMMIT,
+                },
+            }
+        },
+        "winner": {
+            "candidate_id": launch["candidate_id"],
+            "configuration": launch,
+            "overall": {
+                "status": "selected",
+                "winner_candidate_id": launch["candidate_id"],
+            },
+        },
+    }
+
+
+def test_winner_derivation_replaces_only_canonical_launch() -> None:
+    base = json.loads(
+        (PROJECT_ROOT / "configs" / "maxsim_benchmark.json").read_text()
+    )
+    derived, winner = derive_winner.derive_winner_contract(
+        _synthetic_tuning_winner(),
+        base,
+        source_commit=SOURCE_COMMIT,
+    )
+
+    assert len(derived["cases"]) == 6
+    assert len(derived["dtypes"]) == 2
+    assert derived["providers"] == ["torch", "triton"]
+    assert derived["triton_launch"] == {
+        "block_query_tokens": 16,
+        "block_document_tokens": 32,
+        "block_embedding_dimension": 128,
+        "num_warps": 4,
+        "num_stages": 1,
+    }
+    unchanged = set(base) - {"benchmark_id", "triton_launch"}
+    assert all(derived[key] == base[key] for key in unchanged)
+    assert winner["candidate_id"] == "tq16_td32_w4_s1"
+    assert winner["canonical_case_count"] == 6
+
+
+def test_winner_derivation_uses_production_launch_validation() -> None:
+    base = json.loads(
+        (PROJECT_ROOT / "configs" / "maxsim_benchmark.json").read_text()
+    )
+
+    with pytest.raises(ValueError, match="must be one of"):
+        derive_winner.derive_winner_contract(
+            _synthetic_tuning_winner(block_document_tokens=48),
+            base,
+            source_commit=SOURCE_COMMIT,
+        )
+
+
+def test_l4_hardware_gate_records_exact_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    properties = SimpleNamespace(
+        total_memory=23 * 1024**3,
+        major=8,
+        minor=9,
+    )
+    monkeypatch.setattr(l4_assertion.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(l4_assertion.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(
+        l4_assertion.torch.cuda,
+        "get_device_properties",
+        lambda index: properties,
+    )
+    monkeypatch.setattr(
+        l4_assertion.torch.cuda,
+        "get_device_name",
+        lambda index: "NVIDIA L4",
+    )
+
+    result = l4_assertion.inspect_cuda_l4()
+
+    assert result["status"] == "passed"
+    assert result["device"]["total_memory_bytes"] == 23 * 1024**3
+    assert result["device"]["compute_capability"] == [8, 9]
+
+
+def test_l4_hardware_gate_rejects_wrong_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    properties = SimpleNamespace(
+        total_memory=23 * 1024**3,
+        major=8,
+        minor=9,
+    )
+    monkeypatch.setattr(l4_assertion.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(l4_assertion.torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(
+        l4_assertion.torch.cuda,
+        "get_device_properties",
+        lambda index: properties,
+    )
+    monkeypatch.setattr(
+        l4_assertion.torch.cuda,
+        "get_device_name",
+        lambda index: "NVIDIA A10G",
+    )
+
+    result = l4_assertion.inspect_cuda_l4()
+
+    assert result["status"] == "failed"
+    assert any("expected 'NVIDIA L4'" in item for item in result["blockers"])

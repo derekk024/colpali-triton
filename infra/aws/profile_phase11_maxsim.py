@@ -3,21 +3,60 @@
 
 from __future__ import annotations
 
+import argparse
+import hashlib
 import json
+import os
+from pathlib import Path
 import platform
 import time
 
 import torch
 
 from colpali_triton.triton_maxsim import (
-    DEFAULT_TRITON_MAXSIM_CONFIG,
+    TritonMaxSimConfig,
     maxsim_triton,
 )
 
 
+LAUNCH_KEYS = (
+    "block_query_tokens",
+    "block_document_tokens",
+    "block_embedding_dimension",
+    "num_warps",
+    "num_stages",
+)
+
+
+def _load_winner(path: Path) -> tuple[dict[str, object], TritonMaxSimConfig]:
+    winner = json.loads(path.read_text())
+    if not isinstance(winner, dict) or winner.get("format") != (
+        "colpali-triton-phase11-tuning-winner-v1"
+    ):
+        raise ValueError("invalid Phase 11 tuning winner record")
+    source_commit = os.environ.get("COLPALI_SOURCE_COMMIT")
+    if winner.get("source_commit") != source_commit:
+        raise ValueError("winner source commit differs from container source")
+    launch = winner.get("launch_configuration")
+    if not isinstance(launch, dict) or set(launch) != set(LAUNCH_KEYS):
+        raise ValueError("winner launch configuration is invalid")
+    return winner, TritonMaxSimConfig(
+        **{key: launch[key] for key in LAUNCH_KEYS}
+    )
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--winner-record", type=Path, required=True)
+    parser.add_argument("--metadata-output", type=Path, required=True)
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = _parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("the Phase 11 profiling probe requires CUDA")
+    winner, launch_config = _load_winner(args.winner_record)
 
     device = torch.device("cuda", 0)
     # Construct and normalize on CPU so the first launched CUDA kernel under
@@ -49,43 +88,35 @@ def main() -> int:
             documents,
             query_mask=query_mask,
             document_mask=document_mask,
-            config=DEFAULT_TRITON_MAXSIM_CONFIG,
+            config=launch_config,
         )
     torch.cuda.synchronize(device)
     elapsed_ms = (time.perf_counter() - started) * 1000.0
 
-    print(
-        json.dumps(
-            {
-                "format": "colpali-triton-phase11-profile-probe-v1",
-                "python": platform.python_version(),
-                "torch": torch.__version__,
-                "cuda_build": torch.version.cuda,
-                "gpu": torch.cuda.get_device_name(device),
-                "dtype": "float16",
-                "query_shape": list(queries.shape),
-                "document_shape": list(documents.shape),
-                "output_shape": list(scores.shape),
-                "output_sum": float(scores.float().sum().item()),
-                "wall_time_ms_including_cold_compile": elapsed_ms,
-                "triton_launch": {
-                    "block_query_tokens": (
-                        DEFAULT_TRITON_MAXSIM_CONFIG.block_query_tokens
-                    ),
-                    "block_document_tokens": (
-                        DEFAULT_TRITON_MAXSIM_CONFIG.block_document_tokens
-                    ),
-                    "block_embedding_dimension": (
-                        DEFAULT_TRITON_MAXSIM_CONFIG
-                        .block_embedding_dimension
-                    ),
-                    "num_warps": DEFAULT_TRITON_MAXSIM_CONFIG.num_warps,
-                    "num_stages": DEFAULT_TRITON_MAXSIM_CONFIG.num_stages,
-                },
-            },
-            sort_keys=True,
-        )
-    )
+    winner_sha = hashlib.sha256(args.winner_record.read_bytes()).hexdigest()
+    record = {
+        "format": "colpali-triton-phase11-profile-probe-v2",
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "cuda_build": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(device),
+        "source_commit": winner["source_commit"],
+        "winner_candidate_id": winner["candidate_id"],
+        "winner_record_sha256": winner_sha,
+        "launch_configuration": {
+            key: getattr(launch_config, key) for key in LAUNCH_KEYS
+        },
+        "dtype": "float16",
+        "query_shape": list(queries.shape),
+        "document_shape": list(documents.shape),
+        "output_shape": list(scores.shape),
+        "output_sum": float(scores.float().sum().item()),
+        "wall_time_ms_including_cold_compile": elapsed_ms,
+    }
+    with args.metadata_output.open("x", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(json.dumps(record, sort_keys=True))
     return 0
 
 

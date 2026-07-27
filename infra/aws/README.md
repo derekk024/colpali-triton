@@ -130,11 +130,13 @@ for example a later benchmark runner.
 ## One-command Phase 11 run and retrieval
 
 Once the L4 host is running and bootstrap is ready, the Phase 11 workflow
-deploys one clean committed `HEAD`, builds its pinned image, runs every test,
-runs the fixed tuning matrix, runs the full canonical benchmark, and attempts
-one bounded profiler capture. It then seals every remote artifact with
+deploys one clean committed `HEAD`, builds its pinned image, runs the
+CUDA-relevant minimal-dependency tests, runs the fixed tuning matrix, runs the
+full canonical benchmark with the selected winner, and requires one bounded
+profiler capture of that same winner. It then seals every remote artifact with
 SHA-256, downloads a tar bundle, verifies every file, and creates a new local
-directory under `artifacts/phase11/remote/`.
+directory under
+`artifacts/phase11/remote/`.
 
 First print the complete offline plan. This makes no AWS, SSH, or SCP call:
 
@@ -162,14 +164,49 @@ python3 infra/aws/phase11_remote.py \
 
 The remote source and result directories are commit- and run-specific. Neither
 is replaced when it already exists. A successful local directory contains the
-remote `artifact_manifest.json`, its `COMPLETE.sha256` marker, test and
+remote `artifact_manifest.json`, its `SEALED.sha256` marker, test and
 benchmark records, profiler status, exact host/container metadata, and a
 `_retrieval/` receipt plus the verified original bundle.
 
-The profiler probe uses one fixed FP16 ColPali shape. It attempts one Nsight
-Compute launch, or a bounded Nsight Systems trace when only that tool is
-present. Profiling is capped at 300 seconds and a missing or permission-blocked
-profiler is recorded instead of being mistaken for benchmark failure.
+The pinned CUDA image intentionally carries only the dependencies needed for
+MaxSim, Triton, tuning, benchmark, container, and remote-workflow tests. The
+remote selection is explicit in `commands.json`. A separate JUnit assertion
+requires all five real GPU parity cases (including FP16, BF16, FP32, masks,
+non-contiguous inputs, and active NaN behavior) to execute with zero skips.
+The complete dependency-rich suite remains a local gate:
+
+```bash
+python -m pytest
+```
+
+Before tests, compilation, or tuning, a hardware gate requires `cuda:0` to be
+exactly an NVIDIA L4 with compute capability 8.9 and 21–25 GiB of reported
+memory. Its artifact records the exact device name, capability, and byte
+count. A mismatch skips the expensive work, seals the diagnostics as
+incomplete, retrieves them, and leaves the instance running.
+
+Tuning must finish its complete canonical matrix with an eligible winner. A
+strict handoff replaces only `triton_launch` in the six-case, two-dtype
+benchmark config. `tuning_winner.json` records the base config hash, derived
+config hash, tuning result hash, source commit, candidate ID, and exact launch
+parameters. A second cross-check requires the tuning, derived config,
+benchmark provenance, canonical selection, and winner launch to agree before
+the run can be complete.
+
+The profiler probe uses one fixed FP16 ColPali shape. It first attempts one
+Nsight Compute launch; if that is absent, permission-blocked, exits nonzero, or
+does not produce a nonempty `.ncu-rep`, it attempts a bounded Nsight Systems
+trace. Each attempt is capped at 300 seconds. Profiling only succeeds with exit
+code zero, a nonempty `.ncu-rep` or `.nsys-rep`, and probe metadata that
+matches the tuning winner. Only those two bounded profiler containers receive
+`SYS_ADMIN`, as NVIDIA's counter collection requires; no test, tuning, or
+benchmark container gets that capability, and no container is privileged.
+
+Every run is sealed and retrieved even when build, tests, tuning, benchmark, or
+profiling fails. Such a manifest has `status: "incomplete"` with exact failure
+reasons, and the local command returns nonzero only after verified retrieval.
+`SEALED.sha256` means the diagnostic bundle is immutable; it does not claim
+that Phase 11 passed.
 
 This workflow never launches, stops, or terminates an EC2 instance. In
 particular, successful retrieval deliberately leaves the host running so the

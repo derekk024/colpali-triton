@@ -19,6 +19,11 @@ import tarfile
 import tempfile
 from typing import Any, Sequence
 
+AWS_INFRA_DIRECTORY = Path(__file__).resolve().parent
+if str(AWS_INFRA_DIRECTORY) not in sys.path:
+    sys.path.insert(0, str(AWS_INFRA_DIRECTORY))
+from phase11_result_contract import validate_result_contract
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUN_ACKNOWLEDGEMENT = "RUN PHASE 11 ON THIS EXISTING INSTANCE"
@@ -252,10 +257,11 @@ def build_plan(
             "verify the existing host bootstrap ready marker",
             "deploy the clean committed HEAD without replacing prior source",
             "build the digest-pinned linux/amd64 CUDA image",
-            "run the complete test suite on CUDA",
+            "require cuda:0 to match the exact NVIDIA L4 hardware gate",
+            "run the explicit CUDA test suite and zero-skip parity gate",
             "run the fixed Triton tuning matrix",
-            "run the complete canonical PyTorch-versus-Triton benchmark",
-            "attempt one profiler launch with a 300-second hard timeout",
+            "derive the winner config and run all canonical benchmark cases",
+            "profile that winner with bounded ncu then nsys fallback",
             "seal every remote result with SHA-256",
             "retrieve and verify a non-overwriting local bundle",
         ],
@@ -383,21 +389,6 @@ def _upload_archive(spec: RemoteSpec) -> None:
         raise WorkflowError("remote source upload returned unexpected output")
 
 
-def _build_image(spec: RemoteSpec) -> None:
-    source = shlex.quote(spec.remote_source_directory)
-    commit = shlex.quote(spec.source_commit)
-    image = shlex.quote(spec.image_name)
-    _run_ssh(
-        spec,
-        (
-            f"set -eu; cd {source}; "
-            f"COLPALI_SOURCE_COMMIT={commit} "
-            f"COLPALI_CUDA_IMAGE={image} ./docker/build_cuda.sh"
-        ),
-        capture_output=False,
-    )
-
-
 def _run_remote_job(spec: RemoteSpec) -> None:
     source = shlex.quote(spec.remote_source_directory)
     command = " ".join(
@@ -426,9 +417,9 @@ def _seal_remote_bundle(spec: RemoteSpec) -> tuple[str, str]:
     bundle_sha = f"{bundle}.sha256"
     command = (
         "set -eu; "
-        f"test -f {shlex.quote(str(result / 'COMPLETE.sha256'))}; "
+        f"test -f {shlex.quote(str(result / 'SEALED.sha256'))}; "
         f"cd {shlex.quote(str(result))}; "
-        "sha256sum --check COMPLETE.sha256; "
+        "sha256sum --check SEALED.sha256; "
         f"test ! -e {shlex.quote(bundle)}; "
         f"test ! -e {shlex.quote(bundle_sha)}; "
         f"tar --sort=name --mtime='UTC 1970-01-01' "
@@ -500,12 +491,12 @@ def _verify_artifact_manifest(
     *,
     source_commit: str,
     run_id: str,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], str, list[str]]:
     manifest_path = root / "artifact_manifest.json"
-    complete_path = root / "COMPLETE.sha256"
+    sealed_path = root / "SEALED.sha256"
     try:
         manifest = json.loads(manifest_path.read_text())
-        complete = complete_path.read_text().strip()
+        sealed = sealed_path.read_text().strip()
     except (OSError, json.JSONDecodeError) as exc:
         raise WorkflowError(
             f"cannot read remote artifact manifest: {exc}"
@@ -513,7 +504,7 @@ def _verify_artifact_manifest(
     if not isinstance(manifest, dict):
         raise WorkflowError("remote artifact manifest is not an object")
     if manifest.get("format") != (
-        "colpali-triton-phase11-artifact-manifest-v1"
+        "colpali-triton-phase11-artifact-manifest-v2"
     ):
         raise WorkflowError("unexpected remote artifact manifest format")
     if manifest.get("source_commit") != source_commit:
@@ -521,8 +512,173 @@ def _verify_artifact_manifest(
     if manifest.get("run_id") != run_id:
         raise WorkflowError("remote artifact run ID does not match")
     manifest_sha = _sha256_file(manifest_path)
-    if complete != f"{manifest_sha}  artifact_manifest.json":
-        raise WorkflowError("remote COMPLETE marker does not match manifest")
+    if sealed != f"{manifest_sha}  artifact_manifest.json":
+        raise WorkflowError("remote SEALED marker does not match manifest")
+    workflow_status = manifest.get("status")
+    if workflow_status not in {"complete", "incomplete"}:
+        raise WorkflowError("remote workflow status is invalid")
+    reasons = manifest.get("failure_reasons")
+    if not isinstance(reasons, list) or not all(
+        isinstance(reason, str) for reason in reasons
+    ):
+        raise WorkflowError("remote workflow failure reasons are invalid")
+    profiling = manifest.get("profiling")
+    if not isinstance(profiling, dict):
+        raise WorkflowError("remote profiling status is invalid")
+    profile_report = profiling.get("report")
+    profile_metadata = profiling.get("metadata")
+    winner_record_name = profiling.get("winner_record")
+
+    def safe_relative_file(value: object) -> bool:
+        return (
+            isinstance(value, str)
+            and not PurePosixPath(value).is_absolute()
+            and ".." not in PurePosixPath(value).parts
+            and (root / value).is_file()
+            and (root / value).stat().st_size > 0
+        )
+
+    profile_report_is_safe = safe_relative_file(profile_report)
+    profile_metadata_is_safe = safe_relative_file(profile_metadata)
+    winner_record_is_safe = safe_relative_file(winner_record_name)
+    winner_matches_metadata = False
+    if profile_metadata_is_safe and winner_record_is_safe:
+        try:
+            metadata_record = json.loads(
+                (root / profile_metadata).read_text()
+            )
+            winner_record = json.loads(
+                (root / winner_record_name).read_text()
+            )
+        except (OSError, json.JSONDecodeError):
+            metadata_record = None
+            winner_record = None
+        winner_sha = _sha256_file(root / winner_record_name)
+        winner_matches_metadata = (
+            isinstance(metadata_record, dict)
+            and isinstance(winner_record, dict)
+            and metadata_record.get("format")
+            == "colpali-triton-phase11-profile-probe-v2"
+            and winner_record.get("format")
+            == "colpali-triton-phase11-tuning-winner-v1"
+            and metadata_record.get("source_commit")
+            == winner_record.get("source_commit")
+            and metadata_record.get("winner_candidate_id")
+            == winner_record.get("candidate_id")
+            and metadata_record.get("launch_configuration")
+            == winner_record.get("launch_configuration")
+            and metadata_record.get("winner_record_sha256")
+            == winner_sha
+            and profiling.get("winner_record_sha256") == winner_sha
+        )
+    profile_succeeded = (
+        profiling.get("succeeded") is True
+        and profile_report_is_safe
+        and profile_metadata_is_safe
+        and winner_record_is_safe
+        and winner_matches_metadata
+    )
+    steps = manifest.get("steps")
+    if not isinstance(steps, dict) or not steps:
+        raise WorkflowError("remote mandatory-step status is invalid")
+    failed_steps = []
+    for name, record in steps.items():
+        if (
+            not isinstance(name, str)
+            or not isinstance(record, dict)
+            or not isinstance(record.get("exit_code"), int)
+            or isinstance(record.get("exit_code"), bool)
+            or not isinstance(record.get("succeeded"), bool)
+            or record["succeeded"] != (record["exit_code"] == 0)
+        ):
+            raise WorkflowError("remote mandatory-step record is invalid")
+        if not record["succeeded"]:
+            failed_steps.append(name)
+    if workflow_status == "complete" and (
+        reasons or failed_steps or not profile_succeeded
+    ):
+        raise WorkflowError(
+            "remote manifest claims completion without a real profile"
+        )
+    if workflow_status == "incomplete" and not reasons:
+        raise WorkflowError(
+            "remote incomplete manifest lacks failure reasons"
+        )
+    if workflow_status == "complete":
+        try:
+            hardware_gate = json.loads(
+                (root / "hardware_gate.json").read_text()
+            )
+            cuda_assertion = json.loads(
+                (root / "cuda_test_assertion.json").read_text()
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise WorkflowError(
+                f"cannot read GPU gate artifacts: {exc}"
+            ) from exc
+        hardware_device = (
+            hardware_gate.get("device")
+            if isinstance(hardware_gate, dict)
+            else None
+        )
+        if (
+            not isinstance(hardware_gate, dict)
+            or hardware_gate.get("status") != "passed"
+            or not isinstance(hardware_device, dict)
+            or hardware_device.get("name") != "NVIDIA L4"
+            or hardware_device.get("compute_capability") != [8, 9]
+            or not isinstance(
+                hardware_device.get("total_memory_bytes"), int
+            )
+            or not 21 * 1024**3
+            <= hardware_device["total_memory_bytes"]
+            <= 25 * 1024**3
+        ):
+            raise WorkflowError(
+                "remote manifest claims completion without the L4 gate"
+            )
+        observed_counts = (
+            cuda_assertion.get("observed_counts")
+            if isinstance(cuda_assertion, dict)
+            else None
+        )
+        if (
+            not isinstance(cuda_assertion, dict)
+            or cuda_assertion.get("status") != "passed"
+            or not isinstance(observed_counts, dict)
+            or not all(
+                isinstance(value, int) and not isinstance(value, bool)
+                for value in observed_counts.values()
+            )
+            or sum(observed_counts.values()) != 5
+            or cuda_assertion.get("skipped") != []
+            or cuda_assertion.get("failed") != []
+        ):
+            raise WorkflowError(
+                "remote manifest claims completion without five GPU cases"
+            )
+    computed_result_contract = validate_result_contract(
+        root,
+        source_commit=source_commit,
+    )
+    try:
+        stored_result_contract = json.loads(
+            (root / "result_contract_validation.json").read_text()
+        )
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkflowError(
+            f"cannot read result cross-check artifact: {exc}"
+        ) from exc
+    if stored_result_contract != computed_result_contract:
+        raise WorkflowError(
+            "stored result cross-check differs from local recomputation"
+        )
+    if workflow_status == "complete" and (
+        computed_result_contract.get("status") != "passed"
+    ):
+        raise WorkflowError(
+            "remote manifest claims completion with inconsistent results"
+        )
     records = manifest.get("files")
     if not isinstance(records, list):
         raise WorkflowError("remote artifact file list is invalid")
@@ -567,13 +723,24 @@ def _verify_artifact_manifest(
         for path in root.rglob("*")
         if path.is_file()
         for relative in (path.relative_to(root).as_posix(),)
-        if relative not in {"artifact_manifest.json", "COMPLETE.sha256"}
+        if relative not in {"artifact_manifest.json", "SEALED.sha256"}
     }
     if actual != declared:
         raise WorkflowError(
             "remote artifact bundle has missing or undeclared files"
         )
-    return manifest_sha, normalized
+    if profile_succeeded:
+        required_profile_files = {
+            profile_report,
+            profile_metadata,
+            winner_record_name,
+        }
+        if not required_profile_files.issubset(declared):
+            raise WorkflowError(
+                "remote profiler/winner records are not all in the file "
+                "manifest"
+            )
+    return manifest_sha, normalized, workflow_status, reasons
 
 
 def _retrieve_bundle(
@@ -634,7 +801,12 @@ def _retrieve_bundle(
             raise WorkflowError("retrieved bundle SHA-256 does not match")
         extracted = staging / "extracted"
         root = _safe_extract(bundle, extracted, spec.run_id)
-        manifest_sha, files = _verify_artifact_manifest(
+        (
+            manifest_sha,
+            files,
+            workflow_status,
+            failure_reasons,
+        ) = _verify_artifact_manifest(
             root,
             source_commit=spec.source_commit,
             run_id=spec.run_id,
@@ -656,6 +828,8 @@ def _retrieve_bundle(
             "remote_bundle_sha256": bundle_sha,
             "remote_artifact_manifest_sha256": manifest_sha,
             "remote_artifact_file_count": len(files),
+            "remote_workflow_status": workflow_status,
+            "remote_failure_reasons": failure_reasons,
             "instance_was_stopped_or_terminated": False,
         }
         with (retrieval / "receipt.json").open(
@@ -687,12 +861,12 @@ def execute(spec: RemoteSpec) -> dict[str, Any]:
         )
     if remote_state == "missing":
         _upload_archive(spec)
-    _build_image(spec)
     _run_remote_job(spec)
     bundle, bundle_sha = _seal_remote_bundle(spec)
     receipt = _retrieve_bundle(spec, bundle, bundle_sha)
     return {
-        "status": "completed",
+        "status": receipt["remote_workflow_status"],
+        "failure_reasons": receipt["remote_failure_reasons"],
         "source_commit": spec.source_commit,
         "run_id": spec.run_id,
         "local_result_directory": str(spec.local_result_directory),
@@ -760,7 +934,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         result = execute(spec)
         print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
+        return 0 if result["status"] == "complete" else 3
     except (OSError, WorkflowError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
