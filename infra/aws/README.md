@@ -127,6 +127,55 @@ docker/run_cuda_checks.sh
 Pass a custom command after `run_cuda_checks.sh` to use the same GPU container,
 for example a later benchmark runner.
 
+## One-command Phase 11 run and retrieval
+
+Once the L4 host is running and bootstrap is ready, the Phase 11 workflow
+deploys one clean committed `HEAD`, builds its pinned image, runs every test,
+runs the fixed tuning matrix, runs the full canonical benchmark, and attempts
+one bounded profiler capture. It then seals every remote artifact with
+SHA-256, downloads a tar bundle, verifies every file, and creates a new local
+directory under `artifacts/phase11/remote/`.
+
+First print the complete offline plan. This makes no AWS, SSH, or SCP call:
+
+```bash
+python3 infra/aws/phase11_remote.py \
+  --host 203.0.113.10 \
+  --identity-file /absolute/path/to/key.pem \
+  --run-id phase11-l4-20260726
+```
+
+The plan blocks a dirty worktree, a missing private-key file, an existing
+local result directory, and unsafe paths. Omit `--run-id` to derive a unique
+UTC-stamped ID from the source commit.
+
+Run that plan with the explicit execution acknowledgement:
+
+```bash
+python3 infra/aws/phase11_remote.py \
+  --host 203.0.113.10 \
+  --identity-file /absolute/path/to/key.pem \
+  --run-id phase11-l4-20260726 \
+  --execute \
+  --acknowledge-run "RUN PHASE 11 ON THIS EXISTING INSTANCE"
+```
+
+The remote source and result directories are commit- and run-specific. Neither
+is replaced when it already exists. A successful local directory contains the
+remote `artifact_manifest.json`, its `COMPLETE.sha256` marker, test and
+benchmark records, profiler status, exact host/container metadata, and a
+`_retrieval/` receipt plus the verified original bundle.
+
+The profiler probe uses one fixed FP16 ColPali shape. It attempts one Nsight
+Compute launch, or a bounded Nsight Systems trace when only that tool is
+present. Profiling is capped at 300 seconds and a missing or permission-blocked
+profiler is recorded instead of being mistaken for benchmark failure.
+
+This workflow never launches, stops, or terminates an EC2 instance. In
+particular, successful retrieval deliberately leaves the host running so the
+result can be inspected. Termination remains the separate, twice-confirmed
+lifecycle command below.
+
 ## Guarded termination
 
 The default is another offline plan:
