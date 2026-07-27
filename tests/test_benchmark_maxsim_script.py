@@ -154,6 +154,83 @@ def test_deterministic_input_seed_is_case_and_dtype_specific() -> None:
     assert first != runner._input_seed(17, "case-a", "bfloat16")
 
 
+def test_source_commit_provenance_agrees_without_git_metadata(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    commit = "a" * 40
+    (tmp_path / ".source_commit").write_text(
+        commit + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(runner, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("COLPALI_SOURCE_COMMIT", commit)
+
+    record = runner._source_commit_provenance(
+        {"commit": None, "available": False}
+    )
+
+    assert record["effective_commit"] == commit
+    assert record["consistent"] is True
+    assert record["sources"] == {
+        "git": None,
+        "environment": commit,
+        "marker_file": commit,
+    }
+
+
+def test_source_commit_provenance_rejects_disagreement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / ".source_commit").write_text(
+        "a" * 40, encoding="utf-8"
+    )
+    monkeypatch.setattr(runner, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("COLPALI_SOURCE_COMMIT", "b" * 40)
+
+    with pytest.raises(RuntimeError, match="provenance disagrees"):
+        runner._source_commit_provenance(
+            {"commit": "a" * 40, "available": True}
+        )
+
+
+def test_source_commit_provenance_rejects_missing_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runner, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("COLPALI_SOURCE_COMMIT", raising=False)
+
+    with pytest.raises(RuntimeError, match="exact source commit"):
+        runner._source_commit_provenance(
+            {"commit": None, "available": False}
+        )
+
+
+def test_source_commit_provenance_requires_lowercase_full_sha(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runner, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("COLPALI_SOURCE_COMMIT", "A" * 40)
+
+    with pytest.raises(RuntimeError, match="full lowercase Git SHA"):
+        runner._source_commit_provenance(
+            {"commit": None, "available": False}
+        )
+
+
+def test_git_state_survives_missing_git_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing_git(*args: object, **kwargs: object) -> None:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(runner.subprocess, "run", missing_git)
+
+    record = runner._git_state()
+
+    assert record["available"] is False
+    assert record["commit"] is None
+    assert "FileNotFoundError" in record["error"]
+
+
 def test_nvidia_smi_query_parses_rows_and_survives_missing_binary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

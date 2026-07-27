@@ -49,6 +49,7 @@ DEFAULT_OUTPUT = (
 )
 SOURCE_FILES = (
     Path(__file__).resolve(),
+    PROJECT_ROOT / ".source_commit",
     PROJECT_ROOT / "pyproject.toml",
     PROJECT_ROOT / "src" / "colpali_triton" / "__init__.py",
     PROJECT_ROOT / "src" / "colpali_triton" / "benchmarking.py",
@@ -121,20 +122,30 @@ def _package_version(name: str) -> Optional[str]:
 
 
 def _git_state() -> Dict[str, object]:
-    revision = subprocess.run(
-        ("git", "rev-parse", "--verify", "HEAD"),
-        cwd=PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    status = subprocess.run(
-        ("git", "status", "--porcelain", "--untracked-files=all"),
-        cwd=PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        revision = subprocess.run(
+            ("git", "rev-parse", "--verify", "HEAD"),
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        status = subprocess.run(
+            ("git", "status", "--porcelain", "--untracked-files=all"),
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as error:
+        return {
+            "available": False,
+            "commit": None,
+            "dirty": None,
+            "status_entry_count": None,
+            "status_sha256": None,
+            "error": f"{type(error).__name__}: {error}",
+        }
     status_lines = tuple(
         line for line in status.stdout.splitlines() if line
     )
@@ -150,6 +161,72 @@ def _git_state() -> Dict[str, object]:
             if status.returncode == 0
             else None
         ),
+        "error": None,
+    }
+
+
+def _validated_source_commit(
+    value: object, *, source: str
+) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RuntimeError(f"{source} source commit must be a string")
+    commit = value.strip()
+    if commit in ("", "unknown"):
+        return None
+    if (
+        commit != commit.lower()
+        or len(commit) != 40
+        or any(
+            character not in "0123456789abcdef"
+            for character in commit
+        )
+    ):
+        raise RuntimeError(
+            f"{source} source commit is not a full lowercase Git SHA: "
+            f"{value!r}"
+        )
+    return commit
+
+
+def _source_commit_provenance(
+    git_state: Mapping[str, object],
+) -> Dict[str, object]:
+    environment_raw = os.environ.get("COLPALI_SOURCE_COMMIT")
+    marker_path = PROJECT_ROOT / ".source_commit"
+    marker_raw = (
+        marker_path.read_text(encoding="utf-8")
+        if marker_path.is_file()
+        else None
+    )
+    values = {
+        "git": _validated_source_commit(
+            git_state.get("commit"), source="Git"
+        ),
+        "environment": _validated_source_commit(
+            environment_raw, source="COLPALI_SOURCE_COMMIT"
+        ),
+        "marker_file": _validated_source_commit(
+            marker_raw, source=".source_commit"
+        ),
+    }
+    distinct = {value for value in values.values() if value is not None}
+    if len(distinct) > 1:
+        raise RuntimeError(
+            "source commit provenance disagrees across Git, "
+            "COLPALI_SOURCE_COMMIT, and .source_commit"
+        )
+    if not distinct:
+        raise RuntimeError(
+            "an exact source commit is required from Git, "
+            "COLPALI_SOURCE_COMMIT, or .source_commit"
+        )
+    return {
+        "effective_commit": next(iter(distinct), None),
+        "consistent": True,
+        "sources": values,
+        "marker_path": str(marker_path),
     }
 
 
@@ -445,6 +522,7 @@ def _environment(
             for name in (
                 "CUDA_VISIBLE_DEVICES",
                 "CUBLAS_WORKSPACE_CONFIG",
+                "COLPALI_SOURCE_COMMIT",
                 "PYTORCH_CUDA_ALLOC_CONF",
                 "TORCH_CUDA_ARCH_LIST",
                 "TRITON_CACHE_DIR",
@@ -751,6 +829,8 @@ def run_benchmarks(
 
     preflight = _preflight(config, providers=provider_names)
     _require_ready(preflight)
+    git_state = _git_state()
+    source_commit = _source_commit_provenance(git_state)
     device = torch.device("cuda", config.device_index)
     torch.cuda.set_device(device)
     torch.manual_seed(config.seed)
@@ -885,7 +965,8 @@ def run_benchmarks(
             "source_sha256": source_files,
             "source_fingerprint_sha256": source_fingerprint,
             "source_and_config_fingerprint_sha256": combined_fingerprint,
-            "git": _git_state(),
+            "git": git_state,
+            "source_commit": source_commit,
         },
         "protocol": {
             "config": config.to_dict(),
