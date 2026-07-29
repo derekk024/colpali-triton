@@ -29,7 +29,8 @@ CONTAINER_ENVIRONMENT="$(
         --platform linux/amd64 \
         --gpus all \
         "${BASE_IMAGE}" \
-        python -c 'import json, platform, torch, triton; print(json.dumps({"architecture": platform.machine(), "torch": torch.__version__, "cuda_build": torch.version.cuda, "triton": triton.__version__, "cuda_available": torch.cuda.is_available(), "gpu_name": torch.cuda.get_device_name(0), "gpu_memory_bytes": torch.cuda.get_device_properties(0).total_memory}, sort_keys=True))'
+        python -c 'import json, platform, torch, triton; print(json.dumps({"architecture": platform.machine(), "torch": torch.__version__, "cuda_build": torch.version.cuda, "triton": triton.__version__, "cuda_available": torch.cuda.is_available(), "gpu_name": torch.cuda.get_device_name(0), "gpu_memory_bytes": torch.cuda.get_device_properties(0).total_memory}, sort_keys=True))' \
+    | tail -n 1
 )"
 
 export BASE_IMAGE CONTAINER_ENVIRONMENT

@@ -1012,7 +1012,7 @@ def _upload_archive(
         "trap cleanup EXIT HUP INT TERM; "
         "cat > \"${archive_path}\"; "
         f"printf '%s  %s\\n' {archive_sha} \"${{archive_path}}\" "
-        "| sha256sum --check -; "
+        "| sha256sum --check - >/dev/null; "
         "tar --no-same-owner -xf \"${archive_path}\" -C \"${stage}\"; "
         f"{stage_content_check} >/dev/null; "
         f"printf '%s\\n' {commit} > \"${{stage}}/.source_commit\"; "

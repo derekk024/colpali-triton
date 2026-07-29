@@ -97,6 +97,7 @@ def test_dockerfile_uses_exact_amd64_base_and_asserts_stack() -> None:
     assert "FROM --platform=linux/amd64" in dockerfile
     assert config["container"]["base_reference"] in dockerfile
     assert f'base.digest="{EXPECTED_BASE_DIGEST}"' in dockerfile
+    assert "ENTRYPOINT []" in dockerfile
     assert 'torch.version.cuda == "12.4"' in dockerfile
     assert 'triton.__version__ == "3.2.0"' in dockerfile
     assert 'shutil.which("ncu") or shutil.which("nsys")' in dockerfile
@@ -118,6 +119,7 @@ def test_bootstrap_and_container_scripts_preserve_platform_and_digest() -> None:
     assert "bootstrap.ready" in user_data
     assert "nvidia-ctk runtime configure --runtime=docker" in user_data
     assert "torch.cuda.is_available()" in user_data
+    assert "| tail -n 1" in user_data
     assert "--platform linux/amd64" in build_script
     assert "linux/amd64" in check_script
     assert "--gpus" in check_script

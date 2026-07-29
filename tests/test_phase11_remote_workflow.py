@@ -1178,6 +1178,7 @@ def test_source_upload_has_a_separate_transfer_bound(
         workflow._upload_archive(_spec(tmp_path), archive)
 
     assert observed[0][1] == workflow.SOURCE_UPLOAD_TIMEOUT_SECONDS
+    assert "sha256sum --check - >/dev/null" in observed[0][0][-1]
 
 
 def test_detached_job_is_systemd_managed_and_overall_bounded(

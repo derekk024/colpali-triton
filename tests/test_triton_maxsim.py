@@ -443,7 +443,7 @@ def test_cuda_kernel_handles_noncontiguous_inputs_and_empty_masks() -> None:
 
     assert not queries.is_contiguous()
     assert not documents.is_contiguous()
-    torch.testing.assert_close(actual[0], torch.zeros(3))
+    torch.testing.assert_close(actual[0], torch.zeros_like(actual[0]))
     assert torch.isneginf(actual[1, 1])
     torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-3)
 
