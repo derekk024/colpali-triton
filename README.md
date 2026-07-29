@@ -2,26 +2,27 @@
 
 This repository is a scoped reproduction of
 [ColPali: Efficient Document Retrieval with Vision Language Models](https://arxiv.org/abs/2407.01449).
-Phases 1–10 are implemented and locally verified: paper analysis, tested
+Phases 1–12 are complete: paper analysis, tested
 PyTorch MaxSim references, the paper's hardest-in-batch loss, a controlled
 synthetic overfit proof, pinned ViDoRe loaders, measured OCR-text baselines,
 paper-era PaliGemma/ColPali and LoRA integration, a real Apple MPS smoke test,
 scoped multimodal results with a mean-pooled ablation, and a reproducible CUDA
-container, guarded AWS L4 workflow, and benchmark harness.
+container, guarded AWS L4 workflow, tuned Triton kernel, NVIDIA L4 benchmark,
+Nsight profile, and final report.
 
 Phase 6 uses a revision-pinned BGE-M3 checkpoint and remote, column-selective
 reads of two ViDoRe tasks. Phase 7 pins the public BF16 ViDoRe base and the
 original released adapter by full revision and weight digest. Phase 11 is
-fully prepared locally: the Triton forward kernel, bounded tuning matrix,
-tuned-winner benchmark handoff, profiler contract, and immutable remote result
-retrieval are committed. GPU evidence is bound to the exact lifecycle launch
-receipt and independently rechecked against EC2 instance metadata. The kernel
-has not yet run on NVIDIA hardware. No AWS resources have been created.
+verified on an NVIDIA L4: the Triton forward kernel passed every required CUDA
+case, won all 12 canonical FP16/BF16 benchmark comparisons, achieved a 2.27x
+geometric-mean speedup over vectorized PyTorch, and produced a valid Nsight
+Compute report. GPU evidence is bound to the exact lifecycle launch receipt
+and independently rechecked against EC2 instance metadata.
 
 ## Completion status
 
-The project is not complete yet. The remaining acceptance gate is a real
-NVIDIA run followed by the final report.
+The scoped project is complete. Generated model, dataset, and raw benchmark
+artifacts remain ignored; compact results and integrity hashes are committed.
 
 | Acceptance item | Status |
 | --- | --- |
@@ -30,10 +31,10 @@ NVIDIA run followed by the final report.
 | Controlled synthetic overfit | Complete |
 | Two real retrieval baselines | Complete |
 | Scoped released-ColPali results and mean-pooling ablation | Complete |
-| Pinned CUDA/AWS environment and benchmark protocol | Complete locally |
-| Triton execution and PyTorch numerical parity on NVIDIA | Pending L4 run |
-| Reproducible GPU latency, throughput, memory, profiling, and tuning | Pending L4 run |
-| Final discrepancies/limitations report | Pending measured GPU results |
+| Pinned CUDA/AWS environment and benchmark protocol | Complete |
+| Triton execution and PyTorch numerical parity on NVIDIA | Complete: 5 required CUDA cases, zero skips |
+| Reproducible GPU latency, throughput, memory, profiling, and tuning | Complete: 12/12 Triton wins, 2.27x geometric mean |
+| Final discrepancies/limitations report | Complete |
 
 ## Current implementation
 
@@ -248,7 +249,7 @@ comparisons. Exact selection rules, timing, throughput, memory, score-matrix
 digests, raw-result digests, and limitations are in
 [the Phase 9 report](reports/phase_9_colpali_subset.md).
 
-## Phase 10 GPU environment and Phase 11 readiness
+## Phase 10 environment and Phase 11 NVIDIA results
 
 The GPU environment is pinned to `linux/amd64` and the immutable base:
 
@@ -278,12 +279,27 @@ instance ID twice and verifies all managed tags before mutation. See
 [the AWS L4 guide](infra/aws/README.md) for launch, deployment, status, and
 termination commands.
 
-The tuning pass fixes 12 explicit launch candidates across four representative
+The tuning pass fixed 12 explicit launch candidates across four representative
 shapes and FP16/BF16. It performs 12,000 bounded CUDA-event measurements after
 96 cold correctness gates and 960 warmups. The selected winner is validated
 with the production schema, then substituted into the full six-shape,
 two-dtype PyTorch-versus-Triton benchmark. The profiler must use that same
 winner.
+
+On the L4, `tq16_td128_w4_s2` was selected: 16 query tokens, 128 document
+tokens, embedding block 128, four warps, and two stages. Triton won every
+canonical case:
+
+| Dtype | Mean-latency speedup range | Largest absolute error |
+| --- | ---: | ---: |
+| FP16 | 1.60x–4.22x | 0.001039 |
+| BF16 | 1.57x–4.31x | 0.009487 |
+
+Across all 12 cases the geometric-mean speedup was 2.27x. PyTorch's largest
+incremental allocation was 41,798,144 bytes; Triton's largest was 1,536 bytes.
+The CUDA host suite passed 276 tests with one expected MPS skip, all five
+mandatory parity cases executed, and Nsight Compute captured a valid report
+for the selected winner.
 
 ```bash
 python benchmarks/benchmark_maxsim.py --preflight
@@ -292,12 +308,10 @@ python benchmarks/benchmark_maxsim.py
 ```
 
 The local preflight correctly reports that this Mac lacks a CUDA PyTorch build
-and Triton runtime. Given the matching launch receipt and a bootstrapped L4
-host, the fail-closed remote workflow deploys clean committed source, proves
-all five CUDA parity cases ran without skips, tunes, benchmarks the winner,
-captures one real Nsight report, retrieves and independently verifies the
-sealed bundle, and leaves termination as a separate guarded action. First
-print its offline plan:
+and Triton runtime. The completed fail-closed remote workflow deployed clean
+committed source, proved all five CUDA parity cases ran without skips, tuned,
+benchmarked the winner, captured a real Nsight report, and independently
+verified the sealed bundle. To reproduce it, first print the offline plan:
 
 ```bash
 python3 infra/aws/phase11_remote.py \
@@ -312,10 +326,11 @@ none remain, and seals an interrupted run as `incomplete` before retrieval.
 See the AWS guide for the separate execution acknowledgement and termination
 command.
 
-The full workflow must run before any GPU correctness or performance claim is
-valid. See [the Phase 11 preflight report](reports/phase_11_preflight.md),
-[the AWS L4 guide](infra/aws/README.md), and
-[the benchmark protocol](benchmarks/README.md).
+See the [final report](reports/phase_12_final_report.md), the compact
+[GPU result record](reports/phase_11_gpu_results.json), the historical
+[Phase 11 preflight report](reports/phase_11_preflight.md), the
+[AWS L4 guide](infra/aws/README.md), and the
+[benchmark protocol](benchmarks/README.md).
 
 ## Local setup
 

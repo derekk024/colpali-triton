@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "kind": "colpali_triton_phase11_sanitized_summary",
+  "status": "complete",
+  "run_id": "phase11-l4-0f9543e-20260729-final",
+  "source_commit": "0f9543e30e49fc30de8c476b2767e1c29073602b",
+  "completed_at_utc": "2026-07-29T18:37:55.083669Z",
+  "environment": {
+    "cloud": "AWS",
+    "region": "us-west-2",
+    "instance_type": "g6.xlarge",
+    "gpu": "NVIDIA L4",
+    "compute_capability": "8.9",
+    "gpu_memory_bytes": 23661248512,
+    "driver": "595.71.05",
+    "architecture": "x86_64",
+    "torch": "2.6.0+cu124",
+    "cuda_build": "12.4",
+    "triton": "3.2.0",
+    "docker": "29.6.2",
+    "base_image": "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel@sha256:0cf3402e946b7c384ba943ee05c90b4c5a4a05227923921f2b0918c011cfaf56"
+  },
+  "validation": {
+    "local_tests": {
+      "passed": 664,
+      "cuda_only_skipped": 5
+    },
+    "gpu_suite": {
+      "passed": 276,
+      "skipped": 1,
+      "skip_reason": "MPS is unavailable on the Linux CUDA host"
+    },
+    "required_cuda_parity_cases": {
+      "executed": 5,
+      "skipped": 0,
+      "status": "passed"
+    },
+    "result_contract": {
+      "status": "passed",
+      "benchmark_result_count": 12
+    },
+    "workflow_failure_reasons": []
+  },
+  "tuning": {
+    "candidate_count": 12,
+    "workload_count": 8,
+    "measured_cuda_event_samples": 12000,
+    "winner_candidate_id": "tq16_td128_w4_s2",
+    "winner_launch_configuration": {
+      "block_query_tokens": 16,
+      "block_document_tokens": 128,
+      "block_embedding_dimension": 128,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "wall_duration_seconds": 23.34425353200004
+  },
+  "benchmark": {
+    "wall_duration_seconds": 5.385399089000032,
+    "sample_count_per_provider_case": 250,
+    "triton_win_count": 12,
+    "case_count": 12,
+    "geometric_mean_speedup": 2.269698634248509,
+    "minimum_speedup": 1.5702495055569068,
+    "maximum_speedup": 4.313363275455023,
+    "maximum_absolute_error": 0.009487152099609375,
+    "results": [
+      {
+        "case": "colpali_q15_d1",
+        "dtype": "float16",
+        "torch_mean_latency_ms": 0.232617,
+        "triton_mean_latency_ms": 0.105028,
+        "speedup": 2.2148,
+        "torch_incremental_peak_allocated_bytes": 332288,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.000213146
+      },
+      {
+        "case": "colpali_q15_d8",
+        "dtype": "float16",
+        "torch_mean_latency_ms": 0.239157,
+        "triton_mean_latency_ms": 0.104512,
+        "speedup": 2.2883,
+        "torch_incremental_peak_allocated_bytes": 2617344,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.000517845
+      },
+      {
+        "case": "colpali_q15_d32",
+        "dtype": "float16",
+        "torch_mean_latency_ms": 0.243712,
+        "triton_mean_latency_ms": 0.102732,
+        "speedup": 2.3723,
+        "torch_incremental_peak_allocated_bytes": 10454016,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.000555038
+      },
+      {
+        "case": "colpali_q15_d128",
+        "dtype": "float16",
+        "torch_mean_latency_ms": 0.470603,
+        "triton_mean_latency_ms": 0.111392,
+        "speedup": 4.2247,
+        "torch_incremental_peak_allocated_bytes": 41798144,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.000694752
+      },
+      {
+        "case": "padded_q32_d64",
+        "dtype": "float16",
+        "torch_mean_latency_ms": 0.237926,
+        "triton_mean_latency_ms": 0.14698,
+        "speedup": 1.6188,
+        "torch_incremental_peak_allocated_bytes": 25388032,
+        "triton_incremental_peak_allocated_bytes": 1536,
+        "maximum_absolute_error": 0.000666618
+      },
+      {
+        "case": "long_q50_d32",
+        "dtype": "float16",
+        "torch_mean_latency_ms": 0.23679,
+        "triton_mean_latency_ms": 0.148348,
+        "speedup": 1.5962,
+        "torch_incremental_peak_allocated_bytes": 15794688,
+        "triton_incremental_peak_allocated_bytes": 1536,
+        "maximum_absolute_error": 0.001038551
+      },
+      {
+        "case": "colpali_q15_d1",
+        "dtype": "bfloat16",
+        "torch_mean_latency_ms": 0.227283,
+        "triton_mean_latency_ms": 0.1022,
+        "speedup": 2.2239,
+        "torch_incremental_peak_allocated_bytes": 332288,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.003207207
+      },
+      {
+        "case": "colpali_q15_d8",
+        "dtype": "bfloat16",
+        "torch_mean_latency_ms": 0.232276,
+        "triton_mean_latency_ms": 0.102043,
+        "speedup": 2.2763,
+        "torch_incremental_peak_allocated_bytes": 2617344,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.003701687
+      },
+      {
+        "case": "colpali_q15_d32",
+        "dtype": "bfloat16",
+        "torch_mean_latency_ms": 0.235387,
+        "triton_mean_latency_ms": 0.101095,
+        "speedup": 2.3284,
+        "torch_incremental_peak_allocated_bytes": 10454016,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.007442951
+      },
+      {
+        "case": "colpali_q15_d128",
+        "dtype": "bfloat16",
+        "torch_mean_latency_ms": 0.475369,
+        "triton_mean_latency_ms": 0.110209,
+        "speedup": 4.3133,
+        "torch_incremental_peak_allocated_bytes": 41798144,
+        "triton_incremental_peak_allocated_bytes": 1024,
+        "maximum_absolute_error": 0.006272316
+      },
+      {
+        "case": "padded_q32_d64",
+        "dtype": "bfloat16",
+        "torch_mean_latency_ms": 0.231713,
+        "triton_mean_latency_ms": 0.147565,
+        "speedup": 1.5702,
+        "torch_incremental_peak_allocated_bytes": 25388032,
+        "triton_incremental_peak_allocated_bytes": 1536,
+        "maximum_absolute_error": 0.005139351
+      },
+      {
+        "case": "long_q50_d32",
+        "dtype": "bfloat16",
+        "torch_mean_latency_ms": 0.267559,
+        "triton_mean_latency_ms": 0.149994,
+        "speedup": 1.7838,
+        "torch_incremental_peak_allocated_bytes": 15794688,
+        "triton_incremental_peak_allocated_bytes": 1536,
+        "maximum_absolute_error": 0.009487152
+      }
+    ]
+  },
+  "profiling": {
+    "profiler": "Nsight Compute",
+    "status": "succeeded",
+    "report": "maxsim_profile.ncu-rep",
+    "report_size_bytes": 121329,
+    "profile_shape": {
+      "query": [1, 15, 128],
+      "document": [32, 1030, 128],
+      "output": [1, 32],
+      "dtype": "float16"
+    },
+    "metadata_matches_tuning_winner": true,
+    "container_privileged": false,
+    "container_capabilities": ["SYS_ADMIN"]
+  },
+  "lifecycle": {
+    "launched_at_utc": "2026-07-29T18:31:49Z",
+    "termination_requested_at_utc": "2026-07-29T18:38:13Z",
+    "termination_confirmed_at_utc": "2026-07-29T18:45:02.959358Z",
+    "confirmed_terminated": true,
+    "root_volume_delete_on_termination": true,
+    "active_project_instances_after_cleanup": 0,
+    "active_project_volumes_after_cleanup": 0
+  },
+  "artifacts": {
+    "raw_bundle_path": "artifacts/phase11/remote/0f9543e30e49fc30de8c476b2767e1c29073602b/phase11-l4-0f9543e-20260729-final",
+    "raw_bundle_committed": false,
+    "remote_file_count": 37,
+    "artifact_manifest_sha256": "b2b66c56a8227ec9cd4b082ee4cab937591ee4548eb14ac6193e6ab1cb568e53",
+    "remote_bundle_sha256": "8d63be08908dcc6ffe893913e8dbe985ff8d2311ce15d80c20c52d691f599fd5",
+    "benchmark_sha256": "88058b563bdfd38b226e8bd5ff40f88bab0e3e34a1f65d0858c8d814e021d221",
+    "tuning_sha256": "74535b5388d45194fc7dbe2b4722e2ece14b7ef90500987496cfeb3f0a210a5a",
+    "profile_sha256": "4141ff9c485a25e012a9a94f6be06d8eed3cfdf1f4cc591327dc75da1fa17aaf"
+  }
+}
