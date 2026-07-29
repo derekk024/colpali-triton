@@ -4,10 +4,31 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "colpali-triton"
-version = "0.6.0"
-description = "A scoped ColPali reproduction with tested retrieval components"
+version = "1.0.0"
+description = "A reproducible ColPali retrieval study with a GPU-optimized Triton MaxSim kernel"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+authors = [
+    { name = "Derek (derekk024)" },
+]
+keywords = [
+    "colpali",
+    "document-retrieval",
+    "triton",
+    "cuda",
+    "maxsim",
+    "late-interaction",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "numpy>=1.24,<3",
     "torch>=2.2,<3",
@@ -34,6 +55,11 @@ multimodal = [
     "torchvision==0.21.0",
     "transformers==4.42.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/derekk024/colpali-triton"
+Repository = "https://github.com/derekk024/colpali-triton"
+Documentation = "https://github.com/derekk024/colpali-triton/blob/main/reports/phase_12_final_report.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,5 +1,10 @@
 # ColPali Reproduction with Triton MaxSim
 
+[![CI](https://github.com/derekk024/colpali-triton/actions/workflows/ci.yml/badge.svg)](https://github.com/derekk024/colpali-triton/actions/workflows/ci.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776AB.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
+[![GPU: NVIDIA L4](https://img.shields.io/badge/GPU-NVIDIA%20L4-76B900.svg)](reports/phase_12_final_report.md)
+
 This repository is a scoped reproduction of
 [ColPali: Efficient Document Retrieval with Vision Language Models](https://arxiv.org/abs/2407.01449).
 Phases 1–12 are complete: paper analysis, tested
@@ -18,6 +23,26 @@ case, won all 12 canonical FP16/BF16 benchmark comparisons, achieved a 2.27x
 geometric-mean speedup over vectorized PyTorch, and produced a valid Nsight
 Compute report. GPU evidence is bound to the exact lifecycle launch receipt
 and independently rechecked against EC2 instance metadata.
+
+## Key results
+
+| Result | Measurement |
+| --- | ---: |
+| Triton versus PyTorch | **2.27x** geometric-mean speedup |
+| Canonical GPU wins | **12 / 12** FP16/BF16 cases |
+| Mean-latency speedup range | **1.57x–4.31x** |
+| Largest avoided PyTorch intermediate | **41.8 MB → 1.5 KB** incremental allocator peak |
+| Required CUDA parity cases | **5 / 5**, zero skips |
+| Test suites | **664 local + 276 GPU passed** |
+| DocVQA subset nDCG@5 | **0.672** MaxSim vs. **0.280** mean pooling |
+| InfoVQA subset nDCG@5 | **0.868** MaxSim vs. **0.690** mean pooling |
+
+![Triton MaxSim speedup over PyTorch on an NVIDIA L4](assets/benchmark-speedup.svg)
+
+The [final report](reports/phase_12_final_report.md) separates reproduced
+findings, controlled ablations, new kernel results, and limitations. The
+compact [GPU record](reports/phase_11_gpu_results.json) preserves the measured
+values and SHA-256 hashes of the ignored sealed artifact bundle.
 
 ## Completion status
 
@@ -400,6 +425,20 @@ the phase-5 experiment is in [its test report](reports/phase_5_test_results.md);
 the Phase 6 baseline suite is in
 [its test report](reports/phase_6_test_results.md); the historical Phase 10
 environment decision is in
-[the Phase 10 readiness report](reports/phase_10_gpu_preparation.md); and the
-latest complete local verification and remaining NVIDIA gate are in
-[the Phase 11 preflight report](reports/phase_11_preflight.md).
+[the Phase 10 readiness report](reports/phase_10_gpu_preparation.md); the
+historical NVIDIA gate is in
+[the Phase 11 preflight report](reports/phase_11_preflight.md); and the
+completed reproduction is summarized in the
+[Phase 12 final report](reports/phase_12_final_report.md).
+
+## Relationship to upstream and licensing
+
+This is an independent scoped reproduction of the 2024 ColPali paper, not the
+official `illuin-tech/colpali` package. It does not redistribute upstream
+source, datasets, checkpoints, or raw model outputs.
+
+Project code is released under the [MIT License](LICENSE). The referenced
+ColPali adapter is also MIT-licensed, while its PaliGemma backbone remains
+subject to the separate Gemma terms identified by the model card. Anyone
+downloading external datasets or model weights must review and comply with
+their source licenses and terms.

@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">ColPali Reproduction with Triton MaxSim</title>
+  <desc id="desc">A reproducible visual document retrieval project with a custom Triton kernel that achieved a 2.27 times geometric-mean speedup on an NVIDIA L4.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2f81f7"/>
+      <stop offset="1" stop-color="#a371f7"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="28"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <circle cx="1120" cy="40" r="260" fill="#2f81f7" opacity="0.12" filter="url(#glow)"/>
+  <circle cx="1040" cy="610" r="240" fill="#a371f7" opacity="0.10" filter="url(#glow)"/>
+  <rect x="56" y="52" width="1168" height="536" rx="28" fill="none" stroke="#30363d" stroke-width="2"/>
+
+  <text x="92" y="126" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="22" letter-spacing="2">VISUAL DOCUMENT RETRIEVAL · GPU SYSTEMS</text>
+  <text x="92" y="204" fill="#f0f6fc" font-family="ui-sans-serif,system-ui,sans-serif" font-size="54" font-weight="750">ColPali Reproduction</text>
+  <text x="92" y="265" fill="url(#accent)" font-family="ui-sans-serif,system-ui,sans-serif" font-size="54" font-weight="750">with Triton MaxSim</text>
+
+  <text x="92" y="342" fill="#f0f6fc" font-family="ui-sans-serif,system-ui,sans-serif" font-size="74" font-weight="800">2.27×</text>
+  <text x="310" y="321" fill="#c9d1d9" font-family="ui-sans-serif,system-ui,sans-serif" font-size="25" font-weight="600">geometric-mean speedup</text>
+  <text x="310" y="354" fill="#8b949e" font-family="ui-sans-serif,system-ui,sans-serif" font-size="20">vs. vectorized PyTorch on NVIDIA L4</text>
+
+  <g font-family="ui-sans-serif,system-ui,sans-serif">
+    <rect x="92" y="401" width="250" height="86" rx="14" fill="#21262d" stroke="#30363d"/>
+    <text x="116" y="438" fill="#58a6ff" font-size="25" font-weight="750">12 / 12</text>
+    <text x="116" y="467" fill="#c9d1d9" font-size="17">canonical GPU wins</text>
+
+    <rect x="362" y="401" width="250" height="86" rx="14" fill="#21262d" stroke="#30363d"/>
+    <text x="386" y="438" fill="#bc8cff" font-size="25" font-weight="750">1.57–4.31×</text>
+    <text x="386" y="467" fill="#c9d1d9" font-size="17">measured speedup range</text>
+
+    <rect x="632" y="401" width="250" height="86" rx="14" fill="#21262d" stroke="#30363d"/>
+    <text x="656" y="438" fill="#3fb950" font-size="25" font-weight="750">664 + 276</text>
+    <text x="656" y="467" fill="#c9d1d9" font-size="17">local + GPU tests passed</text>
+  </g>
+
+  <g transform="translate(971 222)">
+    <rect x="0" y="0" width="68" height="68" rx="12" fill="#2f81f7" opacity="0.95"/>
+    <rect x="80" y="0" width="68" height="68" rx="12" fill="#58a6ff" opacity="0.82"/>
+    <rect x="160" y="0" width="68" height="68" rx="12" fill="#a371f7" opacity="0.90"/>
+    <rect x="0" y="80" width="68" height="68" rx="12" fill="#58a6ff" opacity="0.68"/>
+    <rect x="80" y="80" width="68" height="68" rx="12" fill="#a371f7" opacity="0.76"/>
+    <rect x="160" y="80" width="68" height="68" rx="12" fill="#bc8cff" opacity="0.88"/>
+    <path d="M26 34h176M26 114h176" stroke="#f0f6fc" stroke-width="5" stroke-linecap="round" opacity="0.88"/>
+  </g>
+
+  <text x="92" y="548" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="18">PYTHON · PYTORCH · TRITON · CUDA · AWS · DOCKER</text>
+  <text x="1188" y="548" fill="#8b949e" font-family="ui-monospace,SFMono-Regular,monospace" font-size="18" text-anchor="end">derekk024</text>
+</svg>

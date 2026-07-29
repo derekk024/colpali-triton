@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software or its benchmark results, please cite it using this metadata."
+title: "ColPali Reproduction with Triton MaxSim"
+abstract: >-
+  A scoped, reproducible ColPali document-retrieval study with tested PyTorch
+  references, real ViDoRe subset results, and a custom tiled Triton MaxSim
+  kernel validated, tuned, and profiled on an NVIDIA L4.
+type: software
+authors:
+  - given-names: "Derek"
+    family-names: "derekk024"
+repository-code: "https://github.com/derekk024/colpali-triton"
+url: "https://github.com/derekk024/colpali-triton"
+version: 1.0.0
+date-released: 2026-07-29
+license: MIT
+keywords:
+  - ColPali
+  - document retrieval
+  - Triton
+  - CUDA
+  - MaxSim
+  - late interaction
+  - PyTorch
